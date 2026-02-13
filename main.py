@@ -15,12 +15,18 @@ import asyncio
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+try:
+    import aiofiles
+    print("INFO: aiofiles is installed and imported successfully.")
+except ImportError:
+    print("CRITICAL: aiofiles is NOT installed. Static files will fail.")
+
 app = FastAPI(title="YouTube Clipper")
 
-# CORS for development
+# CORS for development and production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Allow all origins for simplicity in this demo
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
