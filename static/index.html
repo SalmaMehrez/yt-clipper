@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube Clipper - Extraire des séquences vidéo facilement</title>
+    <meta name="description"
+        content="Découpez et téléchargez des extraits de vidéos YouTube en quelques secondes. Outil gratuit, rapide et sans filigrane.">
+    <meta name="keywords"
+        content="youtube clipper, découper vidéo youtube, télécharger extrait youtube, youtube cutter, mp4, gratuit">
+
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://votre-site.com/">
+    <meta property="og:title" content="YouTube Clipper - Extraire des séquences vidéo">
+    <meta property="og:description"
+        content="Découpez et téléchargez des extraits de vidéos YouTube en quelques secondes.">
+
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image">
+    <meta property="twitter:title" content="YouTube Clipper - Extraire des séquences vidéo">
+    <meta property="twitter:description"
+        content="Découpez et téléchargez des extraits de vidéos YouTube en quelques secondes.">
+
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Outfit', sans-serif;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>YouTube Clipper</h1>
+            <p>Extraire une séquence vidéo en quelques secondes.</p>
+        </header>
+
+        <main>
+            <form id="clipForm">
+                <div class="form-group">
+                    <label for="url">URL YouTube</label>
+                    <div style="display: flex; gap: 10px;">
+                        <input type="url" id="url" name="url" placeholder="https://www.youtube.com/watch?v=..." required
+                            style="flex-grow: 1;">
+                        <button type="button" id="checkVideoBtn"
+                            style="width: auto; padding: 14px 20px; background: var(--secondary-gradient);">
+                            🔍 Vérifier
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Video Metadata Preview -->
+                <div id="videoMeta" class="video-meta-card hidden">
+                    <div class="video-meta-content">
+                        <h3 id="metaTitle" class="video-meta-title"></h3>
+                        <p id="metaDuration" class="video-meta-duration"></p>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="quality">Qualité</label>
+                    <select id="quality" name="quality"
+                        style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 1rem;">
+                        <option value="best" selected>Meilleure (Max)</option>
+                        <option value="2160">4K (2160p)</option>
+                        <option value="1440">2K (1440p)</option>
+                        <option value="1080">1080p</option>
+                        <option value="720">720p</option>
+                        <option value="480">480p (Rapide)</option>
+                        <option value="audio">Audio uniquement (MP3/M4A)</option>
+                    </select>
+                </div>
+
+                <div class="time-inputs">
+                    <div class="form-group">
+                        <label for="startTime">Début (Ex: 00:10 ou 10)</label>
+                        <input type="text" id="startTime" name="startTime" placeholder="00:00" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="endTime">Fin (Ex: 00:30 ou 30)</label>
+                        <input type="text" id="endTime" name="endTime" placeholder="00:30" required>
+                    </div>
+                </div>
+
+                <button type="submit" id="submitBtn">Extraire la séquence</button>
+            </form>
+
+            <div id="statusMessage" class="hidden"></div>
+
+            <div id="resultArea" class="hidden">
+                <h2>Votre clip est prêt !</h2>
+                <div class="video-info">
+                    <p id="videoTitle"></p>
+                    <p>Durée: <span id="videoDuration"></span> secondes</p>
+                </div>
+                <video id="videoPlayer" controls width="100%" class="hidden"
+                    style="margin-top: 1rem; border-radius: 8px;"></video>
+                <a id="downloadLink" href="#" class="btn-download" download>Télécharger le clip</a>
+            </div>
+        </main>
+
+        <footer>
+            <p>Propulsé par yt-dlp & ffmpeg</p>
+        </footer>
+    </div>
+    <script src="/static/app.js"></script>
+</body>
+
+</html>
