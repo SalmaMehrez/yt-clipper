@@ -30,7 +30,28 @@ from pathlib import Path
 
 # Mount static files for frontend with absolute path
 BASE_DIR = Path(__file__).resolve().parent
-app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+STATIC_DIR = BASE_DIR / "static"
+if not STATIC_DIR.exists():
+    print(f"WARNING: Static directory not found at {STATIC_DIR}")
+else:
+    print(f"INFO: Mounting static files from {STATIC_DIR}")
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+@app.get("/debug-paths")
+async def debug_paths():
+    """Debug endpoint to inspect server file structure"""
+    import os
+    try:
+        files = os.listdir(str(BASE_DIR))
+        static_files = os.listdir(str(STATIC_DIR)) if STATIC_DIR.exists() else "Static dir not found"
+        return {
+            "cwd": os.getcwd(),
+            "base_dir": str(BASE_DIR),
+            "root_files": files,
+            "static_files": static_files
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 # Temporary directory for processing
 TMP_DIR = "/tmp/yt_clipper" if os.name == 'posix' else "./tmp/yt_clipper"
