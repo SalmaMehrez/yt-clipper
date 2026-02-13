@@ -100,61 +100,106 @@ def get_seconds(time_str: str) -> int:
 MAX_CONCURRENT_TASKS = int(os.environ.get("MAX_CONCURRENT_TASKS", 2))
 processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
-@app.post("/api/info")
-async def get_video_info(url: str = Form(...)):
-    ydl_opts = {
+# Start defining Cookie logic
+COOKIES_PATH = os.path.join(BASE_DIR, "cookies.txt")
+COOKIES_ENV = os.environ.get("COOKIES_TXT")
+
+if COOKIES_ENV:
+    try:
+        with open(COOKIES_PATH, "w") as f:
+            f.write(COOKIES_ENV)
+        logger.info(f"Created cookies.txt from environment variable at {COOKIES_PATH}")
+    except Exception as e:
+        logger.error(f"Failed to create cookies.txt: {e}")
+
+def get_ydl_opts(client_type='web', check_cookies=True):
+    opts = {
         'quiet': True,
         'no_warnings': True,
         'format': 'best',
-        # Anti-bot options
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'referer': 'https://www.youtube.com/',
         'nocheckcertificate': True,
     }
     
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            
-            title = info.get('title', 'Vidéo sans titre')
-            duration = info.get('duration', 0)
-            thumbnail = info.get('thumbnail', '')
-            formats = info.get('formats', [])
-            
-            # Extract unique resolutions
-            resolutions = set()
-            for f in formats:
-                h = f.get('height')
-                if h and h >= 144: # Filter out very low quality or audio-only in video list
-                    resolutions.add(h)
-            
-            # Sort descending
-            sorted_resolutions = sorted(list(resolutions), reverse=True)
-            
-            # Format for frontend
-            qualities = []
-            for res in sorted_resolutions:
-                label = f"{res}p"
-                if res >= 2160: label += " (4K)"
-                elif res >= 1440: label += " (2K)"
-                elif res == 1080: label += " (HD)"
-                
-                qualities.append({"value": str(res), "label": label})
-                
-            # Always add Audio option
-            qualities.append({"value": "audio", "label": "Audio uniquement (MP3/M4A)"})
+    # Client Selection
+    if client_type == 'android':
+        opts['extractor_args'] = {'youtube': {'player_client': ['android', 'web']}}
+    else:
+        # Default 'web' usually doesn't need specific args, but we can be explicit
+        # opts['extractor_args'] = {'youtube': {'player_client': ['web']}}
+        pass
 
-            return JSONResponse({
-                "status": "success",
-                "title": title,
-                "duration": duration,
-                "thumbnail": thumbnail,
-                "qualities": qualities
-            })
+    # Cookie Injection
+    if check_cookies and os.path.exists(COOKIES_PATH):
+        opts['cookiefile'] = COOKIES_PATH
+        logger.info("Using cookies.txt for extraction")
+        
+    return opts
+
+@app.post("/api/info")
+async def get_video_info(url: str = Form(...)):
+    
+    # 1. Try with WEB client (High Quality)
+    try:
+        logger.info("Attempting extraction with WEB client (High Quality)...")
+        opts = get_ydl_opts('web')
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return process_info(info)
             
     except Exception as e:
-        logger.error(f"Error fetching info: {e}")
-        raise HTTPException(status_code=400, detail=f"Impossible de récupérer les infos : {str(e)}")
+        logger.warning(f"WEB client extraction failed: {e}")
+        error_msg = str(e)
+        
+        # 2. If Sign In / Bot error, Fallback to ANDROID (Low Quality)
+        if "Sign in to confirm" in error_msg or "403" in error_msg or "Video unavailable" in error_msg or "format is not available" in error_msg:
+             logger.info("Falling back to ANDROID client (Low Quality)...")
+             try:
+                 opts = get_ydl_opts('android')
+                 with yt_dlp.YoutubeDL(opts) as ydl:
+                     info = ydl.extract_info(url, download=False)
+                     # Mark as low quality warning?
+                     return process_info(info)
+             except Exception as e2:
+                 logger.error(f"ANDROID fallback also failed: {e2}")
+                 raise HTTPException(status_code=400, detail=f"Echec extraction (Web & Android): {str(e2)}")
+        else:
+             raise HTTPException(status_code=400, detail=f"Impossible de récupérer les infos : {str(e)}")
+
+def process_info(info):
+    title = info.get('title', 'Vidéo sans titre')
+    duration = info.get('duration', 0)
+    thumbnail = info.get('thumbnail', '')
+    formats = info.get('formats', [])
+    
+    resolutions = set()
+    for f in formats:
+        h = f.get('height')
+        if not h and f.get('format_note'):
+            import re
+            match = re.search(r'(\d{3,4})', f['format_note'])
+            if match: h = int(match.group(1))
+
+        if h and h >= 144: resolutions.add(h)
+    
+    sorted_resolutions = sorted(list(resolutions), reverse=True)
+    
+    qualities = []
+    for res in sorted_resolutions:
+        label = f"{res}p"
+        if res >= 2160: label += " (4K)"
+        elif res >= 1440: label += " (2K)"
+        elif res == 1080: label += " (HD)"
+        qualities.append({"value": str(res), "label": label})
+        
+    qualities.append({"value": "audio", "label": "Audio uniquement (MP3/M4A)"})
+
+    return JSONResponse({
+        "status": "success",
+        "title": title,
+        "duration": duration,
+        "thumbnail": thumbnail,
+        "qualities": qualities
+    })
 
 @app.post("/api/clip")
 async def create_clip(
@@ -180,25 +225,39 @@ async def create_clip(
 
             if duration <= 0:
                 raise HTTPException(status_code=400, detail="End time must be greater than start time.")
-            # Removed duration limit as requested
             
             # 1. Download Video Information using yt-dlp
             # We fetch ALL formats and manually select the best one to ensure quality
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-            }
+            # 1. Download Video Information using yt-dlp
+            # Attempt with WEB first (or inferred from quality)
+            # If quality > 480p, we prefer WEB. If quality <= 480, Android is fine.
+            # But simpler to just catch errors too.
+            
+            current_client = 'web'
+            ydl_opts = get_ydl_opts(current_client)
             
             video_url = None
             audio_url = None
             video_height = 0
             video_width = 0
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                try:
+            video_ext = '' # Init
+            
+            info = None
+            
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
-                    video_title = info.get('title', 'video')
-                    formats = info.get('formats', [])
+            except Exception as e:
+                logger.warning(f"Web extraction failed in clip: {e}")
+                # Fallback to Android
+                logger.info("Falling back to Android in clip...")
+                current_client = 'android'
+                ydl_opts = get_ydl_opts('android')
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                     info = ydl.extract_info(url, download=False)
+
+            video_title = info.get('title', 'video')
+            formats = info.get('formats', [])
 
                     # Target height based on quality param
                     target_height = 0
