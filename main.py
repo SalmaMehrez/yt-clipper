@@ -219,12 +219,17 @@ async def create_clip(
                 raise HTTPException(status_code=400, detail="End time must be greater than start time.")
             
             # 2. Download and Clip using yt-dlp native "download-sections"
-            # This is more robust against 403 errors as it handles authentication internally
             output_filename = f"{clip_id}.mp4"
             output_path = os.path.join(TMP_DIR, output_filename)
             
             logger.info(f"Downloading clip using yt-dlp native clipping...")
 
+            # Initialize variables
+            current_client = 'web'
+            video_title = "Video"
+            video_width = 0
+            video_height = 0
+            
             try:
                 # Prepare yt-dlp options for clipping
                 ydl_opts = get_ydl_opts(current_client)
@@ -235,17 +240,17 @@ async def create_clip(
                     'download_ranges': yt_dlp.utils.download_range_func(None, [(start_sec, end_sec)]),
                 })
                 
-                # If a specific quality was requested (and we found a format ID), we could reuse it
-                # But 'best' with download_ranges is usually sufficient and safer. 
-                # If audio-only is requested:
                 if quality == "audio":
                      ydl_opts['format'] = 'bestaudio/best'
-                     # Note: yt-dlp might produce m4a/webm, we might need to ensure mp4 extension or conversion
-                     # For simplicity in this fix, we let yt-dlp decide and just rename/ensure extension if needed.
-                     # But our output_path forces .mp4 usually.
                 
+                # Use extract_info with download=True to get metadata AND download in one go
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([url])
+                    info = ydl.extract_info(url, download=True)
+                    
+                # Extract metadata for response
+                video_title = info.get('title', 'Video')
+                video_width = info.get('width', 0)
+                video_height = info.get('height', 0)
                 
                 logger.info(f"Clip created successfully: {output_path}")
 
