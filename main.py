@@ -325,7 +325,9 @@ async def create_clip(
                 stream.overwrite_output().run(capture_stdout=True, capture_stderr=True)
 
             except ffmpeg.Error as e:
-                logger.warning(f"ffmpeg copy failed, falling back to re-encode")
+                error_details = e.stderr.decode('utf-8') if e.stderr else str(e)
+                logger.error(f"ffmpeg initial attempt failed: {error_details}")
+                logger.warning("Falling back to re-encode with ultrafast preset...")
                 try:
                     if audio_url:
                         input_a = ffmpeg.input(audio_url, ss=start_sec, t=duration)
@@ -335,8 +337,9 @@ async def create_clip(
                     
                     stream.overwrite_output().run(capture_stdout=True, capture_stderr=True)
                 except ffmpeg.Error as e2:
-                    logger.error(f"ffmpeg fallback error: {e2.stderr.decode('utf-8') if e2.stderr else str(e2)}")
-                    raise HTTPException(status_code=500, detail="Failed to process video clip.")
+                    error_details2 = e2.stderr.decode('utf-8') if e2.stderr else str(e2)
+                    logger.error(f"ffmpeg fallback also failed: {error_details2}")
+                    raise HTTPException(status_code=500, detail=f"Failed to process video clip. Error: {error_details2[:200]}")
 
             # 3. Upload or Return Local Link
             download_url = f"/download/{output_filename}"
