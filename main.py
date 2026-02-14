@@ -296,70 +296,83 @@ async def create_clip(
             if not video_url and quality != "audio":
                  raise HTTPException(status_code=400, detail="Could not retrieve video stream.")
 
-            # 2. Download and Cut Video using yt-dlp
-            # Using yt-dlp to download the specific segment directly avoids URL expiration issues
+            # 2. Extract fresh video URLs and cut with ffmpeg
+            # We re-extract URLs right before ffmpeg to minimize expiration risk
             output_filename = f"{clip_id}.mp4"
             output_path = os.path.join(TMP_DIR, output_filename)
 
-            logger.info(f"Downloading clip from {start_time} to {end_time} using yt-dlp...")
+            logger.info(f"Re-extracting fresh URLs for ffmpeg processing...")
             
             try:
-                # Step 1: Download the full video using yt-dlp
-                temp_video_path = os.path.join(TMP_DIR, f"{clip_id}_full.%(ext)s")
+                # Re-extract info to get fresh URLs (they expire quickly)
+                fresh_opts = get_ydl_opts(current_client)
+                fresh_opts['quiet'] = True
                 
-                download_opts = get_ydl_opts(current_client)
-                download_opts.update({
-                    'format': f'bestvideo[height<={target_height if target_height > 0 else 2160}]+bestaudio/best' if quality != "audio" else 'bestaudio',
-                    'outtmpl': temp_video_path,
-                    'merge_output_format': 'mp4',
-                })
+                with yt_dlp.YoutubeDL(fresh_opts) as ydl:
+                    fresh_info = ydl.extract_info(url, download=False)
                 
-                logger.info(f"Downloading video with yt-dlp...")
-                with yt_dlp.YoutubeDL(download_opts) as ydl:
-                    ydl.download([url])
+                fresh_formats = fresh_info.get('formats', [])
                 
-                # Find the downloaded file
-                import glob
-                downloaded_file = None
-                for ext in ['mp4', 'webm', 'mkv']:
-                    pattern = temp_video_path.replace('.%(ext)s', f'.{ext}')
-                    if os.path.exists(pattern):
-                        downloaded_file = pattern
-                        break
+                # Find the same quality streams again
+                fresh_video_url = None
+                fresh_audio_url = None
                 
-                if not downloaded_file:
-                    all_files = os.listdir(TMP_DIR)
-                    logger.error(f"Downloaded file not found. Files in {TMP_DIR}: {all_files}")
-                    raise Exception("Failed to download video")
+                if quality != "audio":
+                    video_formats = [f for f in fresh_formats if f.get('vcodec') != 'none']
+                    if target_height > 0:
+                        exact_matches = [f for f in video_formats if f.get('height') == target_height]
+                        if exact_matches:
+                            candidates = sorted(exact_matches, key=lambda x: x.get('tbr', 0) or 0, reverse=True)
+                        else:
+                            if video_formats:
+                                candidates = sorted(video_formats, key=lambda x: abs((x.get('height', 0) or 0) - target_height))
+                            else:
+                                candidates = []
+                    else:
+                        candidates = video_formats
+                    
+                    if candidates:
+                        fresh_video_url = candidates[0].get('url')
                 
-                logger.info(f"Video downloaded: {downloaded_file} ({os.path.getsize(downloaded_file)} bytes)")
+                audio_formats = [f for f in fresh_formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
+                if audio_formats:
+                    best_audio_format = max(audio_formats, key=lambda x: x.get('abr', 0) or 0)
+                    fresh_audio_url = best_audio_format.get('url')
                 
-                # Step 2: Cut the video segment using ffmpeg
-                logger.info(f"Cutting segment from {start_time} to {end_time}...")
+                logger.info(f"Fresh URLs extracted, processing with ffmpeg...")
                 
-                try:
-                    input_stream = ffmpeg.input(downloaded_file, ss=start_sec, t=duration)
-                    output_stream = ffmpeg.output(
-                        input_stream, 
-                        output_path,
+                # Use ffmpeg with the fresh URLs
+                if fresh_video_url and fresh_audio_url:
+                    input_v = ffmpeg.input(fresh_video_url, ss=start_sec, t=duration)
+                    input_a = ffmpeg.input(fresh_audio_url, ss=start_sec, t=duration)
+                    stream = ffmpeg.output(
+                        input_v, input_a, output_path,
                         vcodec='libx264',
                         acodec='aac',
                         preset='ultrafast',
                         crf=23,
                         movflags='faststart'
                     )
-                    output_stream.overwrite_output().run(capture_stdout=True, capture_stderr=True)
-                    logger.info(f"Clip cut successfully: {output_path}")
-                except ffmpeg.Error as e:
-                    error_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
-                    logger.error(f"ffmpeg cutting failed: {error_msg}")
-                    raise Exception(f"Failed to cut video: {error_msg[:200]}")
-                finally:
-                    # Clean up the full video file
-                    if os.path.exists(downloaded_file):
-                        os.remove(downloaded_file)
-                        logger.info(f"Cleaned up temporary file: {downloaded_file}")
+                elif fresh_video_url:
+                    input_v = ffmpeg.input(fresh_video_url, ss=start_sec, t=duration)
+                    stream = ffmpeg.output(
+                        input_v, output_path,
+                        vcodec='libx264',
+                        acodec='aac',
+                        preset='ultrafast',
+                        crf=23,
+                        movflags='faststart'
+                    )
+                else:
+                    raise Exception("No video stream available")
                 
+                stream.overwrite_output().run(capture_stdout=True, capture_stderr=True, timeout=300)
+                logger.info(f"Clip created successfully: {output_path}")
+                
+            except ffmpeg.Error as e:
+                error_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
+                logger.error(f"ffmpeg processing failed: {error_msg}")
+                raise HTTPException(status_code=500, detail=f"Failed to process clip: {error_msg[:200]}")
             except Exception as e:
                 logger.error(f"Video processing failed: {str(e)}")
                 raise HTTPException(status_code=500, detail=f"Failed to download clip: {str(e)}")
