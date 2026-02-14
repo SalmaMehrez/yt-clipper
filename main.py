@@ -324,30 +324,58 @@ async def create_clip(
                 with yt_dlp.YoutubeDL(download_opts) as ydl:
                     ydl.download([url])
                 
-                # Find the downloaded file (yt-dlp might add format extension)
-                possible_files = [
-                    output_path,
-                    output_path.replace('.mp4', '.webm'),
-                    output_path.replace('.mp4', '.mkv'),
+                # Find the downloaded file - yt-dlp might create it with various extensions
+                import glob
+                base_pattern = output_path.replace('.mp4', '')
+                possible_patterns = [
+                    output_path,  # Exact match
+                    f"{base_pattern}.*",  # Any extension
+                    f"{TMP_DIR}/{clip_id}.*",  # Fallback pattern
                 ]
                 
                 actual_file = None
-                for f in possible_files:
-                    if os.path.exists(f):
-                        actual_file = f
+                logger.info(f"Searching for downloaded file...")
+                
+                # First try exact matches
+                for pattern in possible_patterns[:1]:
+                    if os.path.exists(pattern):
+                        actual_file = pattern
+                        logger.info(f"Found exact match: {actual_file}")
                         break
                 
+                # Then try glob patterns
                 if not actual_file:
-                    raise Exception("Downloaded file not found")
+                    for pattern in possible_patterns[1:]:
+                        matches = glob.glob(pattern)
+                        if matches:
+                            actual_file = matches[0]
+                            logger.info(f"Found via glob '{pattern}': {actual_file}")
+                            break
+                
+                if not actual_file:
+                    # List all files in TMP_DIR for debugging
+                    all_files = os.listdir(TMP_DIR)
+                    logger.error(f"File not found. Files in {TMP_DIR}: {all_files}")
+                    raise Exception(f"Downloaded file not found. Expected: {output_path}")
                 
                 # Rename to .mp4 if needed
                 if actual_file != output_path:
+                    logger.info(f"Renaming {actual_file} to {output_path}")
                     os.rename(actual_file, output_path)
                     
                 logger.info(f"Clip successfully created: {output_path}")
                 
             except Exception as e:
                 logger.error(f"yt-dlp download failed: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Failed to download clip: {str(e)}")
+
+            # Verify the file was actually created
+            if not os.path.exists(output_path):
+                logger.error(f"Output file not found at {output_path}")
+                raise HTTPException(status_code=500, detail="Clip file was not created successfully")
+            
+            file_size = os.path.getsize(output_path)
+            logger.info(f"Clip created successfully: {output_path} ({file_size} bytes)")
 
             # 3. Upload or Return Local Link
             download_url = f"/download/{output_filename}"
