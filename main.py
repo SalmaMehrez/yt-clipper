@@ -296,55 +296,18 @@ async def create_clip(
             if not video_url and quality != "audio":
                  raise HTTPException(status_code=400, detail="Could not retrieve video stream.")
 
-            # 2. Extract fresh video URLs and cut with ffmpeg
-            # We re-extract URLs right before ffmpeg to minimize expiration risk
+            # 2. Process with ffmpeg using the already extracted URLs
+            # We use the URLs from the first extraction which are still valid
             output_filename = f"{clip_id}.mp4"
             output_path = os.path.join(TMP_DIR, output_filename)
 
-            logger.info(f"Re-extracting fresh URLs for ffmpeg processing...")
+            logger.info(f"Processing clip with ffmpeg...")
             
             try:
-                # Re-extract info to get fresh URLs (they expire quickly)
-                fresh_opts = get_ydl_opts(current_client)
-                fresh_opts['quiet'] = True
-                
-                with yt_dlp.YoutubeDL(fresh_opts) as ydl:
-                    fresh_info = ydl.extract_info(url, download=False)
-                
-                fresh_formats = fresh_info.get('formats', [])
-                
-                # Find the same quality streams again
-                fresh_video_url = None
-                fresh_audio_url = None
-                
-                if quality != "audio":
-                    video_formats = [f for f in fresh_formats if f.get('vcodec') != 'none']
-                    if target_height > 0:
-                        exact_matches = [f for f in video_formats if f.get('height') == target_height]
-                        if exact_matches:
-                            candidates = sorted(exact_matches, key=lambda x: x.get('tbr', 0) or 0, reverse=True)
-                        else:
-                            if video_formats:
-                                candidates = sorted(video_formats, key=lambda x: abs((x.get('height', 0) or 0) - target_height))
-                            else:
-                                candidates = []
-                    else:
-                        candidates = video_formats
-                    
-                    if candidates:
-                        fresh_video_url = candidates[0].get('url')
-                
-                audio_formats = [f for f in fresh_formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
-                if audio_formats:
-                    best_audio_format = max(audio_formats, key=lambda x: x.get('abr', 0) or 0)
-                    fresh_audio_url = best_audio_format.get('url')
-                
-                logger.info(f"Fresh URLs extracted, processing with ffmpeg...")
-                
-                # Use ffmpeg with the fresh URLs
-                if fresh_video_url and fresh_audio_url:
-                    input_v = ffmpeg.input(fresh_video_url, ss=start_sec, t=duration)
-                    input_a = ffmpeg.input(fresh_audio_url, ss=start_sec, t=duration)
+                # Use ffmpeg with the extracted URLs
+                if video_url and audio_url:
+                    input_v = ffmpeg.input(video_url, ss=start_sec, t=duration)
+                    input_a = ffmpeg.input(audio_url, ss=start_sec, t=duration)
                     stream = ffmpeg.output(
                         input_v, input_a, output_path,
                         vcodec='libx264',
@@ -353,8 +316,8 @@ async def create_clip(
                         crf=23,
                         movflags='faststart'
                     )
-                elif fresh_video_url:
-                    input_v = ffmpeg.input(fresh_video_url, ss=start_sec, t=duration)
+                elif video_url:
+                    input_v = ffmpeg.input(video_url, ss=start_sec, t=duration)
                     stream = ffmpeg.output(
                         input_v, output_path,
                         vcodec='libx264',
@@ -363,10 +326,18 @@ async def create_clip(
                         crf=23,
                         movflags='faststart'
                     )
+                elif audio_url and quality == "audio":
+                     # Audio only processing
+                     input_a = ffmpeg.input(audio_url, ss=start_sec, t=duration)
+                     stream = ffmpeg.output(
+                        input_a, output_path,
+                        acodec='aac',
+                        vn=None
+                     )
                 else:
-                    raise Exception("No video stream available")
+                    raise Exception("No video/audio stream available")
                 
-                stream.overwrite_output().run(capture_stdout=True, capture_stderr=True, timeout=300)
+                stream.overwrite_output().run(capture_stdout=True, capture_stderr=True)
                 logger.info(f"Clip created successfully: {output_path}")
                 
             except ffmpeg.Error as e:
