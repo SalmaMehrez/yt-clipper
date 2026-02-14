@@ -236,7 +236,6 @@ async def create_clip(
                 ydl_opts.update({
                     'outtmpl': output_path,
                     'format': 'best[ext=mp4]',  # Prefer MP4 for compatibility
-                    'force_keyframes_at_cuts': True,
                     'download_ranges': yt_dlp.utils.download_range_func(None, [(start_sec, end_sec)]),
                 })
                 
