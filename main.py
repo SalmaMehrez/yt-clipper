@@ -296,50 +296,58 @@ async def create_clip(
             if not video_url and quality != "audio":
                  raise HTTPException(status_code=400, detail="Could not retrieve video stream.")
 
-            # 2. Cut Video using ffmpeg
+            # 2. Download and Cut Video using yt-dlp
+            # Using yt-dlp to download the specific segment directly avoids URL expiration issues
             output_filename = f"{clip_id}.mp4"
             output_path = os.path.join(TMP_DIR, output_filename)
 
-            logger.info(f"Cutting video from {start_time} to {end_time}...")
+            logger.info(f"Downloading clip from {start_time} to {end_time} using yt-dlp...")
             
             try:
-                input_v = ffmpeg.input(video_url, ss=start_sec, t=duration)
-                should_reencode = True
+                # Configure yt-dlp to download only the specified time range
+                download_opts = get_ydl_opts(current_client)
+                download_opts.update({
+                    'format': f'bestvideo[height<={target_height if target_height > 0 else 2160}]+bestaudio/best' if quality != "audio" else 'bestaudio',
+                    'outtmpl': output_path.replace('.mp4', '.%(ext)s'),
+                    'download_ranges': lambda info_dict, ydl: [{
+                        'start_time': start_sec,
+                        'end_time': end_sec,
+                    }],
+                    'force_keyframes_at_cuts': True,
+                    'postprocessors': [{
+                        'key': 'FFmpegVideoConvertor',
+                        'preferedformat': 'mp4',
+                    }],
+                    'merge_output_format': 'mp4',
+                })
                 
-                if audio_url:
-                    input_a = ffmpeg.input(audio_url, ss=start_sec, t=duration)
-                    if should_reencode:
-                        stream = ffmpeg.output(input_v, input_a, output_path, 
-                                             vcodec='libx264', preset='superfast', crf=23, 
-                                             acodec='aac', strict='experimental', movflags='faststart')
-                    else:
-                        stream = ffmpeg.output(input_v, input_a, output_path, c='copy', movflags='faststart')
-                else:
-                    if should_reencode:
-                        stream = ffmpeg.output(input_v, output_path, 
-                                             vcodec='libx264', preset='superfast', crf=23, 
-                                             acodec='aac', strict='experimental', movflags='faststart')
-                    else:
-                        stream = ffmpeg.output(input_v, output_path, c='copy', movflags='faststart')
+                with yt_dlp.YoutubeDL(download_opts) as ydl:
+                    ydl.download([url])
                 
-                stream.overwrite_output().run(capture_stdout=True, capture_stderr=True)
-
-            except ffmpeg.Error as e:
-                error_details = e.stderr.decode('utf-8') if e.stderr else str(e)
-                logger.error(f"ffmpeg initial attempt failed: {error_details}")
-                logger.warning("Falling back to re-encode with ultrafast preset...")
-                try:
-                    if audio_url:
-                        input_a = ffmpeg.input(audio_url, ss=start_sec, t=duration)
-                        stream = ffmpeg.output(input_v, input_a, output_path, vcodec='libx264', acodec='aac', preset='ultrafast', strict='experimental', movflags='faststart')
-                    else:
-                        stream = ffmpeg.output(input_v, output_path, vcodec='libx264', acodec='aac', preset='ultrafast', strict='experimental', movflags='faststart')
+                # Find the downloaded file (yt-dlp might add format extension)
+                possible_files = [
+                    output_path,
+                    output_path.replace('.mp4', '.webm'),
+                    output_path.replace('.mp4', '.mkv'),
+                ]
+                
+                actual_file = None
+                for f in possible_files:
+                    if os.path.exists(f):
+                        actual_file = f
+                        break
+                
+                if not actual_file:
+                    raise Exception("Downloaded file not found")
+                
+                # Rename to .mp4 if needed
+                if actual_file != output_path:
+                    os.rename(actual_file, output_path)
                     
-                    stream.overwrite_output().run(capture_stdout=True, capture_stderr=True)
-                except ffmpeg.Error as e2:
-                    error_details2 = e2.stderr.decode('utf-8') if e2.stderr else str(e2)
-                    logger.error(f"ffmpeg fallback also failed: {error_details2}")
-                    raise HTTPException(status_code=500, detail=f"Failed to process video clip. Error: {error_details2[:200]}")
+                logger.info(f"Clip successfully created: {output_path}")
+                
+            except Exception as e:
+                logger.error(f"yt-dlp download failed: {str(e)}")
 
             # 3. Upload or Return Local Link
             download_url = f"/download/{output_filename}"
