@@ -342,8 +342,9 @@ async def create_clip(
                 
             except ffmpeg.Error as e:
                 error_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
-                logger.error(f"ffmpeg processing failed: {error_msg}")
-                raise HTTPException(status_code=500, detail=f"Failed to process clip: {error_msg[:200]}")
+                logger.error(f"ffmpeg processing failed. Full Stderr:\n{error_msg}")
+                # Return the LAST 500 characters to show the actual error, not the banner
+                raise HTTPException(status_code=500, detail=f"Failed to process clip: ...{error_msg[-500:]}")
             except Exception as e:
                 logger.error(f"Video processing failed: {str(e)}")
                 raise HTTPException(status_code=500, detail=f"Failed to download clip: {str(e)}")
