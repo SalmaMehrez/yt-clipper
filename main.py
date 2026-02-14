@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
 import ffmpeg
 import asyncio
+from pathlib import Path
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -31,8 +32,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-from pathlib import Path
 
 # Mount static files for frontend with absolute path
 BASE_DIR = Path(__file__).resolve().parent
@@ -95,8 +94,6 @@ def get_seconds(time_str: str) -> int:
     return 0
 
 # Concurrency Limit
-# 4K re-encoding is heavy. We limit concurrent processing to avoid server crash.
-# Default to 2 concurrent "heavy" tasks. Others will wait in queue.
 MAX_CONCURRENT_TASKS = int(os.environ.get("MAX_CONCURRENT_TASKS", 2))
 processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
@@ -124,8 +121,6 @@ def get_ydl_opts(client_type='web', check_cookies=True):
     if client_type == 'android':
         opts['extractor_args'] = {'youtube': {'player_client': ['android', 'web']}}
     else:
-        # Default 'web' usually doesn't need specific args, but we can be explicit
-        # opts['extractor_args'] = {'youtube': {'player_client': ['web']}}
         pass
 
     # Cookie Injection
@@ -137,7 +132,6 @@ def get_ydl_opts(client_type='web', check_cookies=True):
 
 @app.post("/api/info")
 async def get_video_info(url: str = Form(...)):
-    
     # 1. Try with WEB client (High Quality)
     try:
         logger.info("Attempting extraction with WEB client (High Quality)...")
@@ -157,7 +151,6 @@ async def get_video_info(url: str = Form(...)):
                  opts = get_ydl_opts('android')
                  with yt_dlp.YoutubeDL(opts) as ydl:
                      info = ydl.extract_info(url, download=False)
-                     # Mark as low quality warning?
                      return process_info(info)
              except Exception as e2:
                  logger.error(f"ANDROID fallback also failed: {e2}")
@@ -212,7 +205,6 @@ async def create_clip(
     clip_id = str(uuid.uuid4())
     logger.info(f"Processing clip request {clip_id} for URL: {url} with quality: {quality}")
 
-    # Acquire semaphore to limit concurrent heavy processing
     if processing_semaphore.locked():
         logger.info(f"Request {clip_id} is waiting in queue...")
     
@@ -227,12 +219,6 @@ async def create_clip(
                 raise HTTPException(status_code=400, detail="End time must be greater than start time.")
             
             # 1. Download Video Information using yt-dlp
-            # We fetch ALL formats and manually select the best one to ensure quality
-            # 1. Download Video Information using yt-dlp
-            # Attempt with WEB first (or inferred from quality)
-            # If quality > 480p, we prefer WEB. If quality <= 480, Android is fine.
-            # But simpler to just catch errors too.
-            
             current_client = 'web'
             ydl_opts = get_ydl_opts(current_client)
             
@@ -240,8 +226,7 @@ async def create_clip(
             audio_url = None
             video_height = 0
             video_width = 0
-            video_ext = '' # Init
-            
+            video_ext = ''
             info = None
             
             try:
@@ -249,73 +234,64 @@ async def create_clip(
                     info = ydl.extract_info(url, download=False)
             except Exception as e:
                 logger.warning(f"Web extraction failed in clip: {e}")
-                # Fallback to Android
                 logger.info("Falling back to Android in clip...")
                 current_client = 'android'
                 ydl_opts = get_ydl_opts('android')
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                     info = ydl.extract_info(url, download=False)
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                except Exception as e2:
+                    logger.error(f"yt-dlp error: {e2}")
+                    raise HTTPException(status_code=400, detail=f"Invalid YouTube URL or video not available. Error: {str(e2)}")
 
             video_title = info.get('title', 'video')
             formats = info.get('formats', [])
 
-                    # Target height based on quality param
-                    target_height = 0
-                    try:
-                        if quality != "best" and quality != "audio":
-                            target_height = int(quality)
-                    except ValueError:
-                        target_height = 0 # Fallback to best if parsing fails
+            # Target height based on quality param
+            target_height = 0
+            try:
+                if quality != "best" and quality != "audio":
+                    target_height = int(quality)
+            except ValueError:
+                target_height = 0 
 
-                    best_video = None
-                    best_audio = None
+            best_video = None
+            best_audio = None
 
-                    # Find best audio first
-                    audio_formats = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
-                    if audio_formats:
-                        best_audio = max(audio_formats, key=lambda x: x.get('abr', 0) or 0)
-                    
-                    if quality == "audio":
-                        video_url = None # Audio only
+            audio_formats = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
+            if audio_formats:
+                best_audio = max(audio_formats, key=lambda x: x.get('abr', 0) or 0)
+            
+            if quality == "audio":
+                video_url = None 
+            else:
+                video_formats = [f for f in formats if f.get('vcodec') != 'none']
+                
+                if target_height > 0:
+                    exact_matches = [f for f in video_formats if f.get('height') == target_height]
+                    if exact_matches:
+                        candidates = sorted(exact_matches, key=lambda x: x.get('tbr', 0) or 0, reverse=True)
                     else:
-                        # Get ALL video formats (webm, mp4, etc.)
-                        video_formats = [f for f in formats if f.get('vcodec') != 'none']
-                        
-                        if target_height > 0:
-                            # 1. Try to find EXACT match (height)
-                            exact_matches = [f for f in video_formats if f.get('height') == target_height]
-                            
-                            if exact_matches:
-                                # Prefer higher bitrate options within this height
-                                candidates = sorted(exact_matches, key=lambda x: x.get('tbr', 0) or 0, reverse=True)
-                            else:
-                                 # 2. Fallback: Find closest options (minimize difference)
-                                 if video_formats:
-                                     # Sort by distance to target height
-                                     candidates = sorted(video_formats, key=lambda x: abs((x.get('height', 0) or 0) - target_height))
-                                 else:
-                                     candidates = []
-                        else:
-                            candidates = video_formats
+                         if video_formats:
+                             candidates = sorted(video_formats, key=lambda x: abs((x.get('height', 0) or 0) - target_height))
+                         else:
+                             candidates = []
+                else:
+                    candidates = video_formats
 
-                        if candidates:
-                            # Pick the best candidate (first one after sorting)
-                            best_video = candidates[0]
+                if candidates:
+                    best_video = candidates[0]
 
-                    if best_video:
-                        video_url = best_video.get('url')
-                        video_height = best_video.get('height')
-                        video_width = best_video.get('width')
-                        video_ext = best_video.get('ext')
-                    
-                    if best_audio:
-                        audio_url = best_audio.get('url')
+            if best_video:
+                video_url = best_video.get('url')
+                video_height = best_video.get('height')
+                video_width = best_video.get('width')
+                video_ext = best_video.get('ext')
+            
+            if best_audio:
+                audio_url = best_audio.get('url')
 
-                    logger.info(f"SELECTED VIDEO: {video_width}x{video_height} (Extension: {video_ext})")
-
-                except Exception as e:
-                    logger.error(f"yt-dlp error: {e}")
-                    raise HTTPException(status_code=400, detail=f"Invalid YouTube URL or video not available. Error: {str(e)}")
+            logger.info(f"SELECTED VIDEO: {video_width}x{video_height} (Extension: {video_ext})")
 
             if not video_url and quality != "audio":
                  raise HTTPException(status_code=400, detail="Could not retrieve video stream.")
@@ -327,24 +303,12 @@ async def create_clip(
             logger.info(f"Cutting video from {start_time} to {end_time}...")
             
             try:
-                # Build ffmpeg inputs
                 input_v = ffmpeg.input(video_url, ss=start_sec, t=duration)
-                
-                # Determine if we can copy or need to re-encode
-                # If original is NOT mp4 (e.g. webm VP9 for 4K), we MUST re-encode for MP4 output
-                # OR if we want to be safe, we re-encode.
-                
-                # For 4K/2K (usually VP9/AV1), standard QuickTime/Windows might not play it if we just copy to MP4 container.
-                # We will Force Re-encode for high quality to ensure standard H.264 MP4.
-                # It is slower, but guaranteed to work.
-                
                 should_reencode = True
                 
                 if audio_url:
                     input_a = ffmpeg.input(audio_url, ss=start_sec, t=duration)
-                    
                     if should_reencode:
-                        # Re-encode video to H.264 (fast preset), copy audio if possible or AAC
                         stream = ffmpeg.output(input_v, input_a, output_path, 
                                              vcodec='libx264', preset='superfast', crf=23, 
                                              acodec='aac', strict='experimental', movflags='faststart')
@@ -358,14 +322,11 @@ async def create_clip(
                     else:
                         stream = ffmpeg.output(input_v, output_path, c='copy', movflags='faststart')
                 
-                # Run
                 stream.overwrite_output().run(capture_stdout=True, capture_stderr=True)
 
             except ffmpeg.Error as e:
-                logger.warning(f"ffmpeg copy failed, falling back to re-encode: {e.stderr.decode('utf-8') if e.stderr else str(e)}")
+                logger.warning(f"ffmpeg copy failed, falling back to re-encode")
                 try:
-                    # Fallback to re-encoding if copy fails (e.g. incompatible codecs for mp4)
-                    # Use ultrafast preset to keep it bearable for long videos
                     if audio_url:
                         input_a = ffmpeg.input(audio_url, ss=start_sec, t=duration)
                         stream = ffmpeg.output(input_v, input_a, output_path, vcodec='libx264', acodec='aac', preset='ultrafast', strict='experimental', movflags='faststart')
@@ -377,29 +338,17 @@ async def create_clip(
                     logger.error(f"ffmpeg fallback error: {e2.stderr.decode('utf-8') if e2.stderr else str(e2)}")
                     raise HTTPException(status_code=500, detail="Failed to process video clip.")
 
-            # 3. Upload to GCS or Return Local Link
-            download_url = ""
-            
+            # 3. Upload or Return Local Link
+            download_url = f"/download/{output_filename}"
             if HAS_GCS and os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
-                logger.info(f"Uploading to GCS bucket: {BUCKET_NAME}")
                 try:
                     bucket = GCS_CLIENT.bucket(BUCKET_NAME)
                     blob = bucket.blob(output_filename)
                     blob.upload_from_filename(output_path)
-                    # Make public (if bucket policy allows, or use signed URL)
-                    # blob.make_public() # Be careful with this permission
                     download_url = blob.public_url
-                    # Schedule cleanup of local file
                     background_tasks.add_task(cleanup_file, output_path)
                 except Exception as e:
                     logger.error(f"GCS Upload Error: {e}")
-                    # Fallback to local
-                    download_url = f"/download/{output_filename}"
-            else:
-                download_url = f"/download/{output_filename}"
-                # For local demo, we keep the file for a bit, or you could schedule cleanup after a delay
-                # Here we don't auto-clean immediately so user can download. 
-                # In production, use a cron job or GCS lifecycle.
 
             return JSONResponse({
                 "status": "success",
@@ -420,8 +369,6 @@ async def create_clip(
 async def download_file(filename: str, background_tasks: BackgroundTasks):
     file_path = os.path.join(TMP_DIR, filename)
     if os.path.exists(file_path):
-        # Optional: cleanup after download
-        # background_tasks.add_task(cleanup_file, file_path) 
         return FileResponse(file_path, filename=filename, media_type="video/mp4")
     else:
         raise HTTPException(status_code=404, detail="File not found or expired.")
