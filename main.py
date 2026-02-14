@@ -304,69 +304,64 @@ async def create_clip(
             logger.info(f"Downloading clip from {start_time} to {end_time} using yt-dlp...")
             
             try:
-                # Configure yt-dlp to download only the specified time range
+                # Step 1: Download the full video using yt-dlp
+                temp_video_path = os.path.join(TMP_DIR, f"{clip_id}_full.%(ext)s")
+                
                 download_opts = get_ydl_opts(current_client)
                 download_opts.update({
                     'format': f'bestvideo[height<={target_height if target_height > 0 else 2160}]+bestaudio/best' if quality != "audio" else 'bestaudio',
-                    'outtmpl': output_path.replace('.mp4', '.%(ext)s'),
-                    'download_ranges': lambda info_dict, ydl: [{
-                        'start_time': start_sec,
-                        'end_time': end_sec,
-                    }],
-                    'force_keyframes_at_cuts': True,
-                    'postprocessors': [{
-                        'key': 'FFmpegVideoConvertor',
-                        'preferedformat': 'mp4',
-                    }],
+                    'outtmpl': temp_video_path,
                     'merge_output_format': 'mp4',
                 })
                 
+                logger.info(f"Downloading video with yt-dlp...")
                 with yt_dlp.YoutubeDL(download_opts) as ydl:
                     ydl.download([url])
                 
-                # Find the downloaded file - yt-dlp might create it with various extensions
+                # Find the downloaded file
                 import glob
-                base_pattern = output_path.replace('.mp4', '')
-                possible_patterns = [
-                    output_path,  # Exact match
-                    f"{base_pattern}.*",  # Any extension
-                    f"{TMP_DIR}/{clip_id}.*",  # Fallback pattern
-                ]
-                
-                actual_file = None
-                logger.info(f"Searching for downloaded file...")
-                
-                # First try exact matches
-                for pattern in possible_patterns[:1]:
+                downloaded_file = None
+                for ext in ['mp4', 'webm', 'mkv']:
+                    pattern = temp_video_path.replace('.%(ext)s', f'.{ext}')
                     if os.path.exists(pattern):
-                        actual_file = pattern
-                        logger.info(f"Found exact match: {actual_file}")
+                        downloaded_file = pattern
                         break
                 
-                # Then try glob patterns
-                if not actual_file:
-                    for pattern in possible_patterns[1:]:
-                        matches = glob.glob(pattern)
-                        if matches:
-                            actual_file = matches[0]
-                            logger.info(f"Found via glob '{pattern}': {actual_file}")
-                            break
-                
-                if not actual_file:
-                    # List all files in TMP_DIR for debugging
+                if not downloaded_file:
                     all_files = os.listdir(TMP_DIR)
-                    logger.error(f"File not found. Files in {TMP_DIR}: {all_files}")
-                    raise Exception(f"Downloaded file not found. Expected: {output_path}")
+                    logger.error(f"Downloaded file not found. Files in {TMP_DIR}: {all_files}")
+                    raise Exception("Failed to download video")
                 
-                # Rename to .mp4 if needed
-                if actual_file != output_path:
-                    logger.info(f"Renaming {actual_file} to {output_path}")
-                    os.rename(actual_file, output_path)
-                    
-                logger.info(f"Clip successfully created: {output_path}")
+                logger.info(f"Video downloaded: {downloaded_file} ({os.path.getsize(downloaded_file)} bytes)")
+                
+                # Step 2: Cut the video segment using ffmpeg
+                logger.info(f"Cutting segment from {start_time} to {end_time}...")
+                
+                try:
+                    input_stream = ffmpeg.input(downloaded_file, ss=start_sec, t=duration)
+                    output_stream = ffmpeg.output(
+                        input_stream, 
+                        output_path,
+                        vcodec='libx264',
+                        acodec='aac',
+                        preset='ultrafast',
+                        crf=23,
+                        movflags='faststart'
+                    )
+                    output_stream.overwrite_output().run(capture_stdout=True, capture_stderr=True)
+                    logger.info(f"Clip cut successfully: {output_path}")
+                except ffmpeg.Error as e:
+                    error_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
+                    logger.error(f"ffmpeg cutting failed: {error_msg}")
+                    raise Exception(f"Failed to cut video: {error_msg[:200]}")
+                finally:
+                    # Clean up the full video file
+                    if os.path.exists(downloaded_file):
+                        os.remove(downloaded_file)
+                        logger.info(f"Cleaned up temporary file: {downloaded_file}")
                 
             except Exception as e:
-                logger.error(f"yt-dlp download failed: {str(e)}")
+                logger.error(f"Video processing failed: {str(e)}")
                 raise HTTPException(status_code=500, detail=f"Failed to download clip: {str(e)}")
 
             # Verify the file was actually created
