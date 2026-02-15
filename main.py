@@ -205,77 +205,57 @@ def process_info(info):
 
 def download_clip_native(url, start_sec, end_sec, client_type, quality, output_path):
     """
-    Download full video with yt-dlp, then clip with FFmpeg.
-    This is the most reliable approach that works with all videos.
+    Universal Strategy: Handles both single files and split streams (DASH).
+    Uses native yt-dlp clipping (download_ranges) for efficiency.
     """
+    base_path = os.path.splitext(output_path)[0]
     ydl_opts = get_ydl_opts(client_type)
     
-    # Download full video to temporary file
-    temp_video_id = str(uuid.uuid4())
-    temp_video_path = os.path.join(TMP_DIR, f"temp_{temp_video_id}.%(ext)s")
-    
-    # Select format: best pre-merged format available
+    # Adapt format based on quality
     if quality == 'audio':
-        format_str = 'bestaudio/best'
+        format_spec = 'bestaudio/best'
     else:
-        # Accept any pre-merged format (MP4 or WebM)
-        format_str = 'best[vcodec!=none][acodec!=none]/best'
-    
+        # Use user's "Universal" format spec
+        format_spec = 'best[ext=mp4]/bestvideo+bestaudio/best'
+
     ydl_opts.update({
-        'outtmpl': temp_video_path,
-        'format': format_str,
+        'format': format_spec,
+        'merge_output_format': 'mp4',
+        'download_ranges': yt_dlp.utils.download_range_func(None, [(start_sec, end_sec)]),
+        'force_keyframes_at_cuts': True,
+        'outtmpl': f'{base_path}.%(ext)s',
+        'postprocessors': [{
+            'key': 'FFmpegVideoConvertor',
+            'preferedformat': 'mp4',
+        }],
     })
-    
-    logger.info(f"Downloading full video with yt-dlp ({client_type}, format: {format_str})...")
-    
-    # Download full video
-    info = None
-    downloaded_file = None
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        # Get actual downloaded filename
-        downloaded_file = ydl.prepare_filename(info)
-    
-    if not downloaded_file or not os.path.exists(downloaded_file):
-        raise Exception(f"Failed to download video")
-    
-    logger.info(f"Video downloaded: {downloaded_file}, now clipping with FFmpeg...")
-    
-    # Calculate duration
-    duration = end_sec - start_sec
+
+    logger.info(f"Downloading clip with Universal Strategy ({client_type}, format: {format_spec})...")
     
     try:
-        # Clip with FFmpeg
-        (
-            ffmpeg
-            .input(downloaded_file, ss=start_sec, t=duration)
-            .output(output_path, vcodec='copy', acodec='copy', avoid_negative_ts='make_zero')
-            .overwrite_output()
-            .run(capture_stdout=True, capture_stderr=True)
-        )
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # download=True will trigger download_ranges
+            info = ydl.extract_info(url, download=True)
+            
+        # Verify and normalize output file
+        possible_files = [f"{base_path}.mp4", f"{base_path}.mkv", f"{base_path}.webm", f"{base_path}.m4a"]
+        final_file = next((f for f in possible_files if os.path.exists(f)), None)
         
-        logger.info(f"Clip created successfully: {output_path}")
-        
-    except ffmpeg.Error as e:
-        error_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
-        logger.error(f"FFmpeg clipping failed: {error_msg}")
-        raise Exception(f"FFmpeg clipping failed: {error_msg[-500:]}")
-    finally:
-        # Cleanup temporary full video
-        try:
-            if downloaded_file and os.path.exists(downloaded_file):
-                os.remove(downloaded_file)
-                logger.info(f"Cleaned up temporary file: {downloaded_file}")
-        except Exception as e:
-            logger.warning(f"Failed to cleanup temp file: {e}")
-    
-    if not os.path.exists(output_path):
-        raise Exception(f"Output file not created at {output_path}")
-    
-    if os.path.getsize(output_path) == 0:
-        raise Exception("Clipped file is 0 bytes")
-        
-    return info
+        if final_file:
+            if final_file != output_path:
+                 # Ensure destination is clear before moving
+                 if os.path.exists(output_path):
+                     os.remove(output_path)
+                 os.rename(final_file, output_path)
+            
+            logger.info(f"Clip successfully created at {output_path}")
+            return info # Return info for metadata extraction in create_clip
+        else:
+            raise Exception("Resulting file not found after yt-dlp execution")
+
+    except Exception as e:
+        logger.error(f"Universal Strategy failed: {str(e)}")
+        raise e
 
 @app.post("/api/clip")
 async def create_clip(
