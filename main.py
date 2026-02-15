@@ -204,37 +204,74 @@ def process_info(info):
 
 def download_clip_native(url, start_sec, end_sec, client_type, quality, output_path):
     """
-    Download clip using native yt-dlp with flexible format selection.
-    Accepts any pre-merged format (MP4/WebM) and converts to MP4 via FFmpeg.
+    Download full video with yt-dlp, then clip with FFmpeg.
+    This is the most reliable approach that works with all videos.
     """
     ydl_opts = get_ydl_opts(client_type)
     
-    # CRITICAL: Accept ANY pre-merged format (video+audio in single file)
-    # Don't force ext=mp4 as many videos only have WebM pre-merged formats
+    # Download full video to temporary file
+    temp_video_id = str(uuid.uuid4())
+    temp_video_path = os.path.join(TMP_DIR, f"temp_{temp_video_id}.%(ext)s")
+    
+    # Select format: best pre-merged format available
     if quality == 'audio':
         format_str = 'bestaudio/best'
     else:
-        # Select best format that has BOTH video and audio codecs
+        # Accept any pre-merged format (MP4 or WebM)
         format_str = 'best[vcodec!=none][acodec!=none]/best'
     
     ydl_opts.update({
-        'outtmpl': output_path,  # Use full path directly, no conversion needed
+        'outtmpl': temp_video_path,
         'format': format_str,
-        'download_ranges': yt_dlp.utils.download_range_func(None, [(start_sec, end_sec)]),
-        'force_keyframes_at_cuts': True,
     })
     
-    logger.info(f"Downloading with yt-dlp ({client_type}, format: {format_str})...")
+    logger.info(f"Downloading full video with yt-dlp ({client_type}, format: {format_str})...")
     
+    # Download full video
+    downloaded_file = None
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.extract_info(url, download=True)
+        info = ydl.extract_info(url, download=True)
+        # Get actual downloaded filename
+        downloaded_file = ydl.prepare_filename(info)
     
-    # After post-processing, file should be at output_path (with .mp4 extension)
+    if not downloaded_file or not os.path.exists(downloaded_file):
+        raise Exception(f"Failed to download video")
+    
+    logger.info(f"Video downloaded: {downloaded_file}, now clipping with FFmpeg...")
+    
+    # Calculate duration
+    duration = end_sec - start_sec
+    
+    try:
+        # Clip with FFmpeg
+        (
+            ffmpeg
+            .input(downloaded_file, ss=start_sec, t=duration)
+            .output(output_path, vcodec='copy', acodec='copy', avoid_negative_ts='make_zero')
+            .overwrite_output()
+            .run(capture_stdout=True, capture_stderr=True)
+        )
+        
+        logger.info(f"Clip created successfully: {output_path}")
+        
+    except ffmpeg.Error as e:
+        error_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
+        logger.error(f"FFmpeg clipping failed: {error_msg}")
+        raise Exception(f"FFmpeg clipping failed: {error_msg[-500:]}")
+    finally:
+        # Cleanup temporary full video
+        try:
+            if downloaded_file and os.path.exists(downloaded_file):
+                os.remove(downloaded_file)
+                logger.info(f"Cleaned up temporary file: {downloaded_file}")
+        except Exception as e:
+            logger.warning(f"Failed to cleanup temp file: {e}")
+    
     if not os.path.exists(output_path):
         raise Exception(f"Output file not created at {output_path}")
     
     if os.path.getsize(output_path) == 0:
-        raise Exception("Downloaded file is 0 bytes")
+        raise Exception("Clipped file is 0 bytes")
         
     return True
 
