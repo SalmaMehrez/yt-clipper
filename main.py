@@ -118,51 +118,54 @@ def get_ydl_opts(client_type='web', check_cookies=True):
         'nocheckcertificate': True,
     }
     
-    # Client Selection
+    # Client Selection - Multi-client strategy to bypass bot detection
     if client_type == 'android':
-        # Android client bypasses bot detection
-        opts['extractor_args'] = {
-            'youtube': {
-                'player_client': ['android', 'web']
-            }
-        }
+        opts['extractor_args'] = {'youtube': {'player_client': ['android', 'web']}}
+    elif client_type == 'ios':
+        opts['extractor_args'] = {'youtube': {'player_client': ['ios', 'web']}}
     else:
-        pass
+        # Default Web client
+        opts['extractor_args'] = {'youtube': {'player_client': ['web', 'web_creator']}}
 
     # Cookie Injection
     if check_cookies and os.path.exists(COOKIES_PATH):
         opts['cookiefile'] = COOKIES_PATH
-        logger.info("Using cookies.txt for extraction")
+        logger.info(f"Using cookies.txt for {client_type} extraction")
         
     return opts
 
 @app.post("/api/info")
 async def get_video_info(url: str = Form(...)):
-    # 1. Try with WEB client (High Quality)
+    # 1. Try with WEB client
     try:
-        logger.info("Attempting extraction with WEB client (High Quality)...")
+        logger.info("Attempting extraction with WEB client...")
         opts = get_ydl_opts('web')
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
             return process_info(info)
-            
     except Exception as e:
-        logger.warning(f"WEB client extraction failed: {e}")
-        error_msg = str(e)
+        logger.warning(f"WEB extraction failed: {e}")
         
-        # 2. If Sign In / Bot error, Fallback to ANDROID (Low Quality)
-        if "Sign in to confirm" in error_msg or "403" in error_msg or "Video unavailable" in error_msg or "format is not available" in error_msg:
-             logger.info("Falling back to ANDROID client (Low Quality)...")
-             try:
-                 opts = get_ydl_opts('android')
-                 with yt_dlp.YoutubeDL(opts) as ydl:
-                     info = ydl.extract_info(url, download=False)
-                     return process_info(info)
-             except Exception as e2:
-                 logger.error(f"ANDROID fallback also failed: {e2}")
-                 raise HTTPException(status_code=400, detail=f"Echec extraction (Web & Android): {str(e2)}")
-        else:
-             raise HTTPException(status_code=400, detail=f"Impossible de récupérer les infos : {str(e)}")
+        # 2. Try with IOS client (Very reliable fallback)
+        try:
+            logger.info("Falling back to IOS client...")
+            opts = get_ydl_opts('ios')
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                return process_info(info)
+        except Exception as e2:
+            logger.warning(f"IOS fallback failed: {e2}")
+            
+            # 3. Try with ANDROID client (Last resort)
+            try:
+                logger.info("Falling back to ANDROID client...")
+                opts = get_ydl_opts('android')
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    return process_info(info)
+            except Exception as e3:
+                logger.error(f"All extraction clients failed: {e3}")
+                raise HTTPException(status_code=400, detail=f"Echec extraction (Web/iOS/Android): {str(e3)}")
 
 def process_info(info):
     title = info.get('title', 'Vidéo sans titre')
@@ -319,19 +322,32 @@ async def create_clip(
                 logger.warning(f"Web client clipping failed: {e}")
                 last_error = str(e)
                 
-                # Attempt 2: Android Client (Fallback)
-                if "Sign in" in str(e) or "403" in str(e) or "Video unavailable" in str(e) or "not available" in str(e):
-                    logger.info("Retrying with ANDROID client...")
-                    try:
-                         # Ensure file clean before retry
-                         if os.path.exists(final_output_path):
-                             os.remove(final_output_path)
-                             
-                         video_info = download_clip_native(url, start_sec, end_sec, 'android', quality, final_output_path)
-                         success = True
-                    except Exception as e2:
-                        logger.error(f"Android client clipping also failed: {e2}")
-                        last_error = str(e2)
+                # Attempt 2: IOS Client (Very reliable)
+                logger.info("Retrying with IOS client...")
+                try:
+                    # Ensure file clean before retry
+                    if os.path.exists(final_output_path):
+                        os.remove(final_output_path)
+                    
+                    video_info = download_clip_native(url, start_sec, end_sec, 'ios', quality, final_output_path)
+                    success = True
+                except Exception as e_ios:
+                    logger.warning(f"IOS client clipping failed: {e_ios}")
+                    last_error = str(e_ios)
+                    
+                    # Attempt 3: Android Client (Last resort)
+                    if "Sign in" in str(e_ios) or "403" in str(e_ios) or "Video unavailable" in str(e_ios) or "not available" in str(e_ios):
+                        logger.info("Retrying with ANDROID client...")
+                        try:
+                             # Ensure file clean before retry
+                             if os.path.exists(final_output_path):
+                                 os.remove(final_output_path)
+                                 
+                             video_info = download_clip_native(url, start_sec, end_sec, 'android', quality, final_output_path)
+                             success = True
+                        except Exception as e2:
+                            logger.error(f"Android client clipping also failed: {e2}")
+                            last_error = str(e2)
 
             if not success:
                  raise Exception(f"Failed to create clip after retries. Last error: {last_error}")
