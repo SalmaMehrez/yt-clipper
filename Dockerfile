@@ -8,9 +8,10 @@ ENV PYTHONUNBUFFERED 1
 # Set work directory
 WORKDIR /app
 
-# Install system dependencies (ffmpeg and build tools)
+# Install system dependencies (ffmpeg, nodejs for yt-dlp, and build tools)
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    nodejs \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 

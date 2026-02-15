@@ -123,9 +123,21 @@ def get_ydl_opts(client_type='web', check_cookies=True):
         opts['extractor_args'] = {'youtube': {'player_client': ['android', 'web']}}
     elif client_type == 'ios':
         opts['extractor_args'] = {'youtube': {'player_client': ['ios', 'web']}}
+    elif client_type == 'tv':
+        opts['extractor_args'] = {'youtube': {'player_client': ['tv', 'web']}}
+    elif client_type == 'mweb':
+        opts['extractor_args'] = {'youtube': {'player_client': ['mweb', 'web']}}
+    elif client_type == 'web_creator':
+        opts['extractor_args'] = {'youtube': {'player_client': ['web_creator', 'web']}}
     else:
         # Default Web client
-        opts['extractor_args'] = {'youtube': {'player_client': ['web', 'web_creator']}}
+        opts['extractor_args'] = {'youtube': {'player_client': ['web']}}
+
+    # Extra robustness for Render IP blocks
+    opts.update({
+        'youtube_include_dash_manifest': False,
+        'youtube_include_hls_manifest': False,
+    })
 
     # Cookie Injection
     if check_cookies and os.path.exists(COOKIES_PATH):
@@ -136,7 +148,7 @@ def get_ydl_opts(client_type='web', check_cookies=True):
 
 @app.post("/api/info")
 async def get_video_info(url: str = Form(...)):
-    clients = ['web', 'ios', 'android']
+    clients = ['web', 'ios', 'tv', 'android', 'mweb', 'web_creator', 'none']
     
     for client in clients:
         # Try with cookies first, then without cookies
@@ -145,9 +157,20 @@ async def get_video_info(url: str = Form(...)):
                 cookie_status = "with cookies" if use_cookies else "WITHOUT cookies"
                 logger.info(f"Attempting {client} extraction {cookie_status}...")
                 
-                opts = get_ydl_opts(client, check_cookies=use_cookies)
-                # Disable format checking during info extraction to avoid "Requested format is not available"
-                opts['check_formats'] = False 
+                if client == 'none':
+                    # Clean attempt without any special extractor_args
+                    opts = {
+                        'quiet': True,
+                        'no_warnings': True,
+                        'nocheckcertificate': True,
+                        'check_formats': False
+                    }
+                    if use_cookies and os.path.exists(COOKIES_PATH):
+                        opts['cookiefile'] = COOKIES_PATH
+                else:
+                    opts = get_ydl_opts(client, check_cookies=use_cookies)
+                    # Disable format checking during info extraction to avoid "Requested format is not available"
+                    opts['check_formats'] = False 
                 
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=False)
@@ -157,7 +180,7 @@ async def get_video_info(url: str = Form(...)):
                 continue # Try next combination
                 
     logger.error("All extraction attempts failed.")
-    raise HTTPException(status_code=400, detail="Echec extraction : Format non disponible ou blocage YouTube (Web/iOS/Android)")
+    raise HTTPException(status_code=400, detail="YouTube bloque l'accès depuis Render (Web/iOS/TV/Android). Essayez une autre vidéo ou réessayez plus tard.")
 
 def process_info(info):
     title = info.get('title', 'Vidéo sans titre')
@@ -282,12 +305,12 @@ async def create_clip(
                  try: os.remove(final_output_path)
                  except: pass
 
-            # Retry Logic: Try Web -> IOS -> Android, each with and without cookies
+            # Retry Logic: Try all clients, with and without cookies
             success = False
             last_error = ""
             video_info = None
             
-            clients_to_try = ['web', 'ios', 'android']
+            clients_to_try = ['web', 'ios', 'tv', 'android', 'mweb', 'web_creator', 'none']
             for client in clients_to_try:
                 if success: break
                 for use_cookies in [True, False]:
@@ -299,7 +322,12 @@ async def create_clip(
                         if os.path.exists(final_output_path):
                             os.remove(final_output_path)
                             
-                        video_info = download_clip_native(url, start_sec, end_sec, client, quality, final_output_path, check_cookies=use_cookies)
+                        # Use clean opts for 'none' case
+                        if client == 'none':
+                             video_info = download_clip_native(url, start_sec, end_sec, 'web', quality, final_output_path, check_cookies=use_cookies)
+                        else:
+                             video_info = download_clip_native(url, start_sec, end_sec, client, quality, final_output_path, check_cookies=use_cookies)
+                        
                         success = True
                         break # Success with this client/cookie combo
                     except Exception as e:
