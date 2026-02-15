@@ -232,10 +232,16 @@ async def create_clip(
             
             # Ensure output file doesn't exist to avoid ffmpeg error 183 (File already exists)
             if os.path.exists(output_path):
+                logger.warning(f"File {output_path} already exists. Attempting to delete...")
                 try:
                     os.remove(output_path)
+                    logger.info(f"Successfully deleted {output_path}")
                 except Exception as e:
-                    logger.warning(f"Could not remove existing file {output_path}: {e}")
+                    logger.error(f"CRITICAL: Could not remove existing file {output_path}: {e}")
+                    # If we can't delete it, try to generate a new unique name
+                    output_filename = f"{clip_id}_{uuid.uuid4().hex[:4]}.mp4"
+                    output_path = os.path.join(TMP_DIR, output_filename)
+                    logger.info(f"Switched to new filename: {output_path}")
 
             try:
                 # Prepare yt-dlp options for clipping
@@ -245,11 +251,15 @@ async def create_clip(
                     'format': 'best[ext=mp4]',  # Prefer MP4 for compatibility
                     'download_ranges': yt_dlp.utils.download_range_func(None, [(start_sec, end_sec)]),
                     'overwrites': True,
+                    # Explicitly force ffmpeg to overwrite if it's called
+                    'downloader_args': {'ffmpeg': ['-y']},
+                    'postprocessor_args': {'ffmpeg': ['-y']},
                 })
                 
                 if quality == "audio":
                      ydl_opts['format'] = 'bestaudio/best'
                 
+                logger.info(f"Starting yt-dlp download to {output_path}...")
                 # Use extract_info with download=True to get metadata AND download in one go
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
@@ -262,7 +272,8 @@ async def create_clip(
                 logger.info(f"Clip created successfully: {output_path}")
 
             except Exception as e:
-                logger.error(f"yt-dlp clipping failed: {str(e)}")
+                logger.exception("yt-dlp clipping failed detailed error:")
+                # Raise 500 but log the full detail
                 raise HTTPException(status_code=500, detail=f"Failed to process clip: {str(e)}")
 
             # Verify the file was actually created
