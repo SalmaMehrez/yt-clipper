@@ -225,8 +225,11 @@ async def create_clip(
             os.makedirs(request_tmp_dir, exist_ok=True)
             
             output_filename = f"{clip_id}.mp4"
-            # yt-dlp will write to the distinct folder
+            # yt-dlp option 'paths' sets the directory, so 'outtmpl' should generally just be the filename
+            # to avoid path duplication (e.g. tmp/guid/tmp/guid/file.mp4)
+            # However, we need to know the full path for verifying existence later.
             output_path_internal = os.path.join(request_tmp_dir, output_filename)
+            
             # Final path where we want the file (in shared tmp)
             final_output_path = os.path.join(TMP_DIR, output_filename)
             
@@ -247,13 +250,11 @@ async def create_clip(
                 # Prepare yt-dlp options for clipping
                 ydl_opts = get_ydl_opts(current_client)
                 ydl_opts.update({
-                    'outtmpl': output_path_internal,
+                    'outtmpl': output_filename, # JUST the filename, path is handled by 'paths'
                     'format': 'best[ext=mp4]', 
                     'download_ranges': yt_dlp.utils.download_range_func(None, [(start_sec, end_sec)]),
                     'overwrites': True,
                     'paths': {'home': request_tmp_dir, 'temp': request_tmp_dir}, # Force all temp files here
-                    # Disable keyframes for stability
-                    #'force_keyframes_at_cuts': True, 
                 })
                 
                 if quality == "audio":
