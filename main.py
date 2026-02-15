@@ -230,6 +230,13 @@ async def create_clip(
             video_width = 0
             video_height = 0
             
+            # Ensure output file doesn't exist to avoid ffmpeg error 183 (File already exists)
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except Exception as e:
+                    logger.warning(f"Could not remove existing file {output_path}: {e}")
+
             try:
                 # Prepare yt-dlp options for clipping
                 ydl_opts = get_ydl_opts(current_client)
@@ -237,6 +244,7 @@ async def create_clip(
                     'outtmpl': output_path,
                     'format': 'best[ext=mp4]',  # Prefer MP4 for compatibility
                     'download_ranges': yt_dlp.utils.download_range_func(None, [(start_sec, end_sec)]),
+                    'overwrites': True,
                 })
                 
                 if quality == "audio":
