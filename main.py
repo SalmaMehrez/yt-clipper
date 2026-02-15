@@ -136,36 +136,28 @@ def get_ydl_opts(client_type='web', check_cookies=True):
 
 @app.post("/api/info")
 async def get_video_info(url: str = Form(...)):
-    # 1. Try with WEB client
-    try:
-        logger.info("Attempting extraction with WEB client...")
-        opts = get_ydl_opts('web')
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            return process_info(info)
-    except Exception as e:
-        logger.warning(f"WEB extraction failed: {e}")
-        
-        # 2. Try with IOS client (Very reliable fallback)
-        try:
-            logger.info("Falling back to IOS client...")
-            opts = get_ydl_opts('ios')
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                return process_info(info)
-        except Exception as e2:
-            logger.warning(f"IOS fallback failed: {e2}")
-            
-            # 3. Try with ANDROID client (Last resort)
+    clients = ['web', 'ios', 'android']
+    
+    for client in clients:
+        # Try with cookies first, then without cookies
+        for use_cookies in [True, False]:
             try:
-                logger.info("Falling back to ANDROID client...")
-                opts = get_ydl_opts('android')
+                cookie_status = "with cookies" if use_cookies else "WITHOUT cookies"
+                logger.info(f"Attempting {client} extraction {cookie_status}...")
+                
+                opts = get_ydl_opts(client, check_cookies=use_cookies)
+                # Disable format checking during info extraction to avoid "Requested format is not available"
+                opts['check_formats'] = False 
+                
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                     return process_info(info)
-            except Exception as e3:
-                logger.error(f"All extraction clients failed: {e3}")
-                raise HTTPException(status_code=400, detail=f"Echec extraction (Web/iOS/Android): {str(e3)}")
+            except Exception as e:
+                logger.warning(f"{client} extraction ({cookie_status}) failed: {e}")
+                continue # Try next combination
+                
+    logger.error("All extraction attempts failed.")
+    raise HTTPException(status_code=400, detail="Echec extraction : Format non disponible ou blocage YouTube (Web/iOS/Android)")
 
 def process_info(info):
     title = info.get('title', 'Vidéo sans titre')
