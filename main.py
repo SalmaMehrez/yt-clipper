@@ -121,7 +121,13 @@ def get_ydl_opts(client_type='web', check_cookies=True):
     
     # Client Selection
     if client_type == 'android':
-        opts['extractor_args'] = {'youtube': {'player_client': ['android', 'web']}}
+        # Android client bypasses bot detection and prefers legacy pre-merged formats
+        opts['extractor_args'] = {
+            'youtube': {
+                'player_client': ['android', 'web_creator'],
+                'skip': ['hls', 'dash']  # Force legacy pre-merged formats
+            }
+        }
     else:
         pass
 
@@ -198,31 +204,41 @@ def process_info(info):
 
 def download_clip_native(url, start_sec, end_sec, client_type, quality, output_path):
     """
-    Download clip using native yt-dlp (simple approach).
+    Download clip using native yt-dlp with flexible format selection.
+    Accepts any pre-merged format (MP4/WebM) and converts to MP4 via FFmpeg.
     """
     ydl_opts = get_ydl_opts(client_type)
     
-    # CRITICAL: When using download_ranges, yt-dlp cannot merge video+audio
-    # We must use pre-merged formats only (formats that already contain both video and audio)
+    # CRITICAL: Accept ANY pre-merged format (video+audio in single file)
+    # Don't force ext=mp4 as many videos only have WebM pre-merged formats
     if quality == 'audio':
         format_str = 'bestaudio/best'
     else:
-        # Use only pre-merged formats (single file with video+audio)
-        # This works with download_ranges, unlike bestvideo+bestaudio
-        format_str = 'best[ext=mp4]/best'
+        # Select best format that has BOTH video and audio codecs
+        format_str = 'best[vcodec!=none][acodec!=none]/best'
+    
+    # Remove .mp4 extension from output path as yt-dlp will add it after conversion
+    output_base = output_path[:-4] if output_path.endswith('.mp4') else output_path
     
     ydl_opts.update({
-        'outtmpl': output_path,
+        'outtmpl': output_base,
         'format': format_str,
         'download_ranges': yt_dlp.utils.download_range_func(None, [(start_sec, end_sec)]),
         'force_keyframes_at_cuts': True,
+        
+        # Post-processor: Convert any format to MP4 after download
+        'postprocessors': [{
+            'key': 'FFmpegVideoConvertor',
+            'preferedformat': 'mp4',
+        }],
     })
     
-    logger.info(f"Downloading with yt-dlp ({client_type}, format: {format_str})...")
+    logger.info(f"Downloading with yt-dlp ({client_type}, format: {format_str}, will convert to MP4)...")
     
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.extract_info(url, download=True)
     
+    # After post-processing, file should be at output_path (with .mp4 extension)
     if not os.path.exists(output_path):
         raise Exception(f"Output file not created at {output_path}")
     
