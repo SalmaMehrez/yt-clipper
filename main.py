@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
 import ffmpeg
 import asyncio
+import sys
+import subprocess
 from pathlib import Path
 
 # Configure logging
