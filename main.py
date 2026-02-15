@@ -226,6 +226,7 @@ def download_clip_native(url, start_sec, end_sec, client_type, quality, output_p
     logger.info(f"Downloading full video with yt-dlp ({client_type}, format: {format_str})...")
     
     # Download full video
+    info = None
     downloaded_file = None
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -271,7 +272,7 @@ def download_clip_native(url, start_sec, end_sec, client_type, quality, output_p
     if os.path.getsize(output_path) == 0:
         raise Exception("Clipped file is 0 bytes")
         
-    return True
+    return info
 
 @app.post("/api/clip")
 async def create_clip(
@@ -308,10 +309,11 @@ async def create_clip(
             # Retry Logic: Try Web client first, then Android
             success = False
             last_error = ""
+            video_info = None
             
             # Attempt 1: Web Client
             try:
-                download_clip_native(url, start_sec, end_sec, 'web', quality, final_output_path)
+                video_info = download_clip_native(url, start_sec, end_sec, 'web', quality, final_output_path)
                 success = True
             except Exception as e:
                 logger.warning(f"Web client clipping failed: {e}")
@@ -325,7 +327,7 @@ async def create_clip(
                          if os.path.exists(final_output_path):
                              os.remove(final_output_path)
                              
-                         download_clip_native(url, start_sec, end_sec, 'android', quality, final_output_path)
+                         video_info = download_clip_native(url, start_sec, end_sec, 'android', quality, final_output_path)
                          success = True
                     except Exception as e2:
                         logger.error(f"Android client clipping also failed: {e2}")
@@ -340,8 +342,13 @@ async def create_clip(
                 logger.error(f"Output file not found at {final_output_path}")
                 raise HTTPException(status_code=500, detail="Clip file was not created successfully")
             
-            file_size = os.path.getsize(output_path)
-            logger.info(f"Clip created successfully: {output_path} ({file_size} bytes)")
+            file_size = os.path.getsize(final_output_path)
+            logger.info(f"Clip created successfully: {final_output_path} ({file_size} bytes)")
+
+            # Extract metadata for response
+            video_title = video_info.get("title", "Clip YouTube")
+            video_width = video_info.get("width", 0)
+            video_height = video_info.get("height", 0)
 
             # 3. Upload or Return Local Link
             download_url = f"/download/{output_filename}"
@@ -349,9 +356,9 @@ async def create_clip(
                 try:
                     bucket = GCS_CLIENT.bucket(BUCKET_NAME)
                     blob = bucket.blob(output_filename)
-                    blob.upload_from_filename(output_path)
+                    blob.upload_from_filename(final_output_path)
                     download_url = blob.public_url
-                    background_tasks.add_task(cleanup_file, output_path)
+                    background_tasks.add_task(cleanup_file, final_output_path)
                 except Exception as e:
                     logger.error(f"GCS Upload Error: {e}")
 
