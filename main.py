@@ -222,6 +222,9 @@ async def create_clip(
             # Strategy: ffmpeg pipes data to STDOUT, Python writes to file.
             # This completely bypasses ffmpeg's file checking/locking mechanism on Windows.
             
+            output_filename = f"{clip_id}.mp4"
+            final_output_path = os.path.join(TMP_DIR, output_filename)
+            
             logger.info(f"Starting ffmpeg PIPE stream to {output_filename}...")
 
             # Initialize variables
