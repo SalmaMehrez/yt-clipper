@@ -196,6 +196,65 @@ def process_info(info):
         "qualities": qualities
     })
 
+def run_ytdlp_subprocess(url, start_sec, end_sec, client_type, quality, output_path):
+    """
+    Helper to run yt-dlp as a subprocess with proper headers/auth/client.
+    """
+    cmd = [
+        sys.executable, '-m', 'yt_dlp',
+        '--download-sections', f"*{start_sec}-{end_sec}",
+        '--force-keyframes-at-cuts',
+        '-o', '-', # Stream to STDOUT
+        '--quiet',
+        '--no-warnings',
+    ]
+
+    # Client Selection
+    if client_type == 'android':
+        # Use Android client to bypass bot detection
+        cmd.extend(['--extractor-args', 'youtube:player_client=android'])
+    else:
+        # Default Web client
+        # Explicitly set user agent to match a real browser if needed, but yt-dlp default is usually okay.
+        pass
+
+    # Cookie Injection
+    if os.path.exists(COOKIES_PATH):
+        cmd.extend(['--cookies', COOKIES_PATH])
+        logger.info(f"Using cookies from {COOKIES_PATH}")
+
+    # Format Selection
+    if quality == 'audio':
+        cmd.extend(['--format', 'bestaudio/best'])
+    else:
+        cmd.extend(['--format', 'best[ext=mp4]'])
+
+    cmd.append(url)
+    
+    logger.info(f"Running yt-dlp subprocess ({client_type}): {' '.join(cmd)}")
+    
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    
+    # Read stdout into file in chunks
+    with open(output_path, 'wb') as f:
+        while True:
+            chunk = process.stdout.read(1024 * 1024) # 1MB chunks
+            if not chunk:
+                break
+            f.write(chunk)
+    
+    stderr_output = process.stderr.read().decode('utf-8')
+    process.wait()
+    
+    if process.returncode != 0:
+        logger.error(f"yt-dlp process ({client_type}) failed: {stderr_output}")
+        raise Exception(f"{stderr_output}")
+
+    if os.path.getsize(output_path) == 0:
+        raise Exception(f"yt-dlp produced 0 bytes output.")
+        
+    return True
+
 @app.post("/api/clip")
 async def create_clip(
     url: str = Form(...),
@@ -220,79 +279,46 @@ async def create_clip(
             if duration <= 0:
                 raise HTTPException(status_code=400, detail="End time must be greater than start time.")
             
-            # 2. Download and Clip using yt-dlp via STDOUT (The "Nuclear" Option)
-            # Strategy: Run yt-dlp as a subprocess, tell it to download ONLY the section, 
-            # and stream the result to STDOUT ('-o -'). Python captures stdout and writes the file.
-            # This solves:
-            # - 403 Forbidden: yt-dlp handles cookies/headers/signatures internally.
-            # - 183 File Exists: yt-dlp NEVER writes to disk, so no file locking issues on Windows.
-            # - Invalid Data (M3U8): yt-dlp handles HLS/M3U8 formats automatically.
-
             output_filename = f"{clip_id}.mp4"
             final_output_path = os.path.join(TMP_DIR, output_filename)
             
-            logger.info(f"Starting yt-dlp STDOUT stream to {output_filename}...")
-
             # Ensure final output doesn't exist
             if os.path.exists(final_output_path):
                  try: os.remove(final_output_path)
                  except: pass
 
-            cmd = [
-                sys.executable, '-m', 'yt_dlp',
-                '--download-sections', f"*{start_sec}-{end_sec}",
-                '--force-keyframes-at-cuts',
-                '-o', '-', # Stream to STDOUT
-                '--quiet', # Don't pollute stdout
-                '--no-warnings',
-                url
-            ]
+            # Retry Logic: Try Web client first, then Android
+            success = False
+            last_error = ""
             
-            if quality == 'audio':
-                cmd.extend(['--format', 'bestaudio/best'])
-            else:
-                cmd.extend(['--format', 'best[ext=mp4]'])
-
-            logger.info(f"Running command: {' '.join(cmd)}")
-            
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            
-            # Read stdout into file in chunks
-            with open(final_output_path, 'wb') as f:
-                while True:
-                    chunk = process.stdout.read(1024 * 1024) # 1MB chunks
-                    if not chunk:
-                        break
-                    f.write(chunk)
-            
-            stderr_output = process.stderr.read().decode('utf-8')
-            process.wait()
-            
-            if process.returncode != 0:
-                logger.error(f"yt-dlp process failed: {stderr_output}")
-                raise Exception(f"yt-dlp failed: {stderr_output}")
+            # Attempt 1: Web Client
+            try:
+                run_ytdlp_subprocess(url, start_sec, end_sec, 'web', quality, final_output_path)
+                success = True
+            except Exception as e:
+                logger.warning(f"Web client clipping failed: {e}")
+                last_error = str(e)
                 
-            if os.path.getsize(final_output_path) == 0:
-                raise Exception("yt-dlp produced 0 bytes output. Check logs.")
+                # Attempt 2: Android Client (Fallback)
+                if "Sign in" in str(e) or "403" in str(e) or "Video unavailable" in str(e):
+                    logger.info("Retrying with ANDROID client...")
+                    try:
+                         # Ensure file clean before retry
+                         if os.path.exists(final_output_path):
+                             os.remove(final_output_path)
+                             
+                         run_ytdlp_subprocess(url, start_sec, end_sec, 'android', quality, final_output_path)
+                         success = True
+                    except Exception as e2:
+                        logger.error(f"Android client clipping also failed: {e2}")
+                        last_error = str(e2)
 
-            logger.info(f"Clip created successfully via PIPE: {final_output_path}")
+            if not success:
+                 raise Exception(f"Failed to create clip after retries. Last error: {last_error}")
 
-            # Check final path
-            output_path = final_output_path
+            logger.info(f"Clip created successfully: {final_output_path}")
 
             # Verify the file was actually created
-            if not os.path.exists(output_path):
-                 # Sometimes yt-dlp appends .mp4 or .webm automatically if not in outtmpl
-                 # Check for potential file with different extension
-                 base_path = os.path.splitext(output_path)[0]
-                 for ext in ['.mp4', '.webm', '.mkv', '.m4a']:
-                     if os.path.exists(base_path + ext):
-                         # ID found, rename to expected output_path if needed
-                         if base_path + ext != output_path:
-                             shutil.move(base_path + ext, output_path)
-                         break
-            
-            if not os.path.exists(output_path):
                 logger.error(f"Output file not found at {output_path}")
                 raise HTTPException(status_code=500, detail="Clip file was not created successfully")
             
