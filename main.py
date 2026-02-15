@@ -120,11 +120,10 @@ def get_ydl_opts(client_type='web', check_cookies=True):
     
     # Client Selection
     if client_type == 'android':
-        # Android client bypasses bot detection and prefers legacy pre-merged formats
+        # Android client bypasses bot detection
         opts['extractor_args'] = {
             'youtube': {
-                'player_client': ['android', 'web_creator'],
-                'skip': ['hls', 'dash']  # Force legacy pre-merged formats
+                'player_client': ['android', 'web']
             }
         }
     else:
