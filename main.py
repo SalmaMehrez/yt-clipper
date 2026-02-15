@@ -115,7 +115,6 @@ def get_ydl_opts(client_type='web', check_cookies=True):
     opts = {
         'quiet': True,
         'no_warnings': True,
-        'format': 'best',
         'nocheckcertificate': True,
     }
     
