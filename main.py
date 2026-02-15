@@ -218,27 +218,11 @@ async def create_clip(
             if duration <= 0:
                 raise HTTPException(status_code=400, detail="End time must be greater than start time.")
             
-            # 2. Download and Clip using yt-dlp Native Clipping (Isolated)
-            # We revert to native clipping to solve 403 errors.
-            # We use a UNIQUE temp folder for each request to solve 183 "File exists" errors.
-            request_tmp_dir = os.path.join(TMP_DIR, clip_id)
-            os.makedirs(request_tmp_dir, exist_ok=True)
+            # 2. Extract Info and Stream via Pipe (Ultimate 183 Fix)
+            # Strategy: ffmpeg pipes data to STDOUT, Python writes to file.
+            # This completely bypasses ffmpeg's file checking/locking mechanism on Windows.
             
-            output_filename = f"{clip_id}.mp4"
-            # yt-dlp option 'paths' sets the directory, so 'outtmpl' should generally just be the filename
-            # to avoid path duplication (e.g. tmp/guid/tmp/guid/file.mp4)
-            # However, we need to know the full path for verifying existence later.
-            output_path_internal = os.path.join(request_tmp_dir, output_filename)
-            
-            # Final path where we want the file (in shared tmp)
-            final_output_path = os.path.join(TMP_DIR, output_filename)
-            
-            # Ensure final output doesn't exist
-            if os.path.exists(final_output_path):
-                 try: os.remove(final_output_path)
-                 except: pass
-
-            logger.info(f"Downloading clip using yt-dlp native clipping (isolated in {request_tmp_dir})...")
+            logger.info(f"Starting ffmpeg PIPE stream to {output_filename}...")
 
             # Initialize variables
             current_client = 'web'
@@ -247,57 +231,92 @@ async def create_clip(
             video_height = 0
             
             try:
-                # Prepare yt-dlp options for clipping
+                # 1. Extract Info (URL + Headers)
                 ydl_opts = get_ydl_opts(current_client)
-                ydl_opts.update({
-                    'outtmpl': output_filename, # JUST the filename, path is handled by 'paths'
-                    'format': 'best[ext=mp4]', 
-                    'download_ranges': yt_dlp.utils.download_range_func(None, [(start_sec, end_sec)]),
-                    'overwrites': True,
-                    'paths': {'home': request_tmp_dir, 'temp': request_tmp_dir}, # Force all temp files here
-                })
-                
-                if quality == "audio":
-                     ydl_opts['format'] = 'bestaudio/best'
-                
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    # Download=True gets metadata AND the clip
-                    info = ydl.extract_info(url, download=True)
-                    
-                # Extract metadata
+                    info = ydl.extract_info(url, download=False)
+
                 video_title = info.get('title', 'Video')
                 video_width = info.get('width', 0)
                 video_height = info.get('height', 0)
                 
-                logger.info(f"Internal clip created: {output_path_internal}")
-                
-                # Verify and Move
-                target_file = None
-                if os.path.exists(output_path_internal):
-                    target_file = output_path_internal
-                else:
-                    # Check for variations in extension
-                    base_path = os.path.splitext(output_path_internal)[0]
-                    for ext in ['.mp4', '.webm', '.mkv', '.m4a']:
-                         if os.path.exists(base_path + ext):
-                             target_file = base_path + ext
-                             break
-                
-                if target_file:
-                    shutil.move(target_file, final_output_path)
-                    logger.info(f"Moved clip to final path: {final_output_path}")
-                else:
-                    raise Exception("Output file missing in isolated dir")
+                # Get Headers
+                http_headers = info.get('http_headers', {})
+                headers_str = ""
+                for key, value in http_headers.items():
+                    headers_str += f"{key}: {value}\r\n"
 
+                # Select Formats (Manual selection)
+                formats = info.get('formats', [])
+                video_url = None
+                audio_url = None
+                
+                if quality == "audio":
+                    best_audio = next((f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none'), None)
+                    if best_audio: audio_url = best_audio['url']
+                else:
+                    video_formats = [f for f in formats if f.get('vcodec') != 'none']
+                    if quality != "best":
+                         target = int(quality)
+                         video_formats = sorted(video_formats, key=lambda x: abs((x.get('height', 0) or 0) - target))
+                    
+                    if video_formats:
+                        best_video = max(video_formats, key=lambda x: x.get('tbr', 0) or 0)
+                        video_url = best_video['url']
+                        video_width = best_video.get('width')
+                        video_height = best_video.get('height')
+
+                    best_audio = next((f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none'), None)
+                    if best_audio: audio_url = best_audio['url']
+
+                if not video_url and quality != "audio":
+                     raise Exception("No video stream found")
+
+                # 2. Build ffmpeg command for PIPING
+                # Output to 'pipe:' with movflags for streaming mp4
+                if quality == "audio":
+                     input_stream = ffmpeg.input(audio_url, ss=start_sec, t=duration, headers=headers_str)
+                     output_stream = ffmpeg.output(input_stream, 'pipe:', acodec='aac', vn=None, format='mp4', movflags='frag_keyframe+empty_moov')
+                else:
+                     input_v = ffmpeg.input(video_url, ss=start_sec, t=duration, headers=headers_str)
+                     if audio_url:
+                         input_a = ffmpeg.input(audio_url, ss=start_sec, t=duration, headers=headers_str)
+                         output_stream = ffmpeg.output(input_v, input_a, 'pipe:', vcodec='libx264', acodec='aac', preset='ultrafast', crf=23, format='mp4', movflags='frag_keyframe+empty_moov')
+                     else:
+                         output_stream = ffmpeg.output(input_v, 'pipe:', vcodec='libx264', acodec='aac', preset='ultrafast', crf=23, format='mp4', movflags='frag_keyframe+empty_moov')
+                
+                # 3. Run and Capture
+                # We overwrite 'overwrites' just in case, though unrelated to pipe
+                logger.info("Executing ffmpeg pipe...")
+                out, err = output_stream.global_args('-y', '-hide_banner').run(capture_stdout=True, capture_stderr=True)
+                
+                if not out:
+                    raise Exception("ffmpeg produced no output")
+                    
+                # 4. Python writes to file (Robust)
+                # Ensure final output doesn't exist just before writing
+                if os.path.exists(final_output_path):
+                     try: os.remove(final_output_path)
+                     except: pass
+                     
+                with open(final_output_path, "wb") as f:
+                    f.write(out)
+                
+                logger.info(f"Clip created successfully via PIPE: {final_output_path} ({len(out)} bytes)")
+
+            except ffmpeg.Error as e:
+                error_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
+                logger.error(f"ffmpeg processing failed. Full Stderr:\n{error_msg}")
+                raise HTTPException(status_code=500, detail=f"ffmpeg error: {error_msg[-500:]}")
             except Exception as e:
-                logger.exception("yt-dlp isolated clipping failed:")
+                logger.exception("Clipping failed detailed error:")
                 raise HTTPException(status_code=500, detail=f"Failed to process clip: {str(e)}")
             finally:
-                # Cleanup the isolated directory
+                # Cleanup the isolated directory (not really used now, but good practice if we reverted)
                 try:
                     shutil.rmtree(request_tmp_dir, ignore_errors=True)
                 except Exception as e:
-                    logger.warning(f"Failed to cleanup temp dir {request_tmp_dir}: {e}")
+                    pass
 
             # Check final path
             output_path = final_output_path
