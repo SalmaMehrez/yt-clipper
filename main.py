@@ -217,23 +217,14 @@ def download_clip_native(url, start_sec, end_sec, client_type, quality, output_p
         # Select best format that has BOTH video and audio codecs
         format_str = 'best[vcodec!=none][acodec!=none]/best'
     
-    # Remove .mp4 extension from output path as yt-dlp will add it after conversion
-    output_base = output_path[:-4] if output_path.endswith('.mp4') else output_path
-    
     ydl_opts.update({
-        'outtmpl': output_base,
+        'outtmpl': output_path,  # Use full path directly, no conversion needed
         'format': format_str,
         'download_ranges': yt_dlp.utils.download_range_func(None, [(start_sec, end_sec)]),
         'force_keyframes_at_cuts': True,
-        
-        # Post-processor: Convert any format to MP4 after download
-        'postprocessors': [{
-            'key': 'FFmpegVideoConvertor',
-            'preferedformat': 'mp4',
-        }],
     })
     
-    logger.info(f"Downloading with yt-dlp ({client_type}, format: {format_str}, will convert to MP4)...")
+    logger.info(f"Downloading with yt-dlp ({client_type}, format: {format_str})...")
     
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.extract_info(url, download=True)
