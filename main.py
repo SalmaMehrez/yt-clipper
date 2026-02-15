@@ -195,13 +195,13 @@ def process_info(info):
         "qualities": qualities
     })
 
-def download_clip_native(url, start_sec, end_sec, client_type, quality, output_path):
+def download_clip_native(url, start_sec, end_sec, client_type, quality, output_path, check_cookies=True):
     """
     Universal Strategy: Handles both single files and split streams (DASH).
     Uses native yt-dlp clipping (download_ranges) for efficiency.
     """
     base_path = os.path.splitext(output_path)[0]
-    ydl_opts = get_ydl_opts(client_type)
+    ydl_opts = get_ydl_opts(client_type, check_cookies=check_cookies)
     
     # Adapt format based on quality
     if quality == 'audio':
@@ -216,6 +216,7 @@ def download_clip_native(url, start_sec, end_sec, client_type, quality, output_p
         'download_ranges': yt_dlp.utils.download_range_func(None, [(start_sec, end_sec)]),
         'force_keyframes_at_cuts': True,
         'outtmpl': f'{base_path}.%(ext)s',
+        'check_formats': False, # Avoid "Requested format is not available" errors
         'postprocessors': [{
             'key': 'FFmpegVideoConvertor',
             'preferedformat': 'mp4',
@@ -281,48 +282,32 @@ async def create_clip(
                  try: os.remove(final_output_path)
                  except: pass
 
-            # Retry Logic: Try Web client first, then Android
+            # Retry Logic: Try Web -> IOS -> Android, each with and without cookies
             success = False
             last_error = ""
             video_info = None
             
-            # Attempt 1: Web Client
-            try:
-                video_info = download_clip_native(url, start_sec, end_sec, 'web', quality, final_output_path)
-                success = True
-            except Exception as e:
-                logger.warning(f"Web client clipping failed: {e}")
-                last_error = str(e)
-                
-                # Attempt 2: IOS Client (Very reliable)
-                logger.info("Retrying with IOS client...")
-                try:
-                    # Ensure file clean before retry
-                    if os.path.exists(final_output_path):
-                        os.remove(final_output_path)
-                    
-                    video_info = download_clip_native(url, start_sec, end_sec, 'ios', quality, final_output_path)
-                    success = True
-                except Exception as e_ios:
-                    logger.warning(f"IOS client clipping failed: {e_ios}")
-                    last_error = str(e_ios)
-                    
-                    # Attempt 3: Android Client (Last resort)
-                    if "Sign in" in str(e_ios) or "403" in str(e_ios) or "Video unavailable" in str(e_ios) or "not available" in str(e_ios):
-                        logger.info("Retrying with ANDROID client...")
-                        try:
-                             # Ensure file clean before retry
-                             if os.path.exists(final_output_path):
-                                 os.remove(final_output_path)
-                                 
-                             video_info = download_clip_native(url, start_sec, end_sec, 'android', quality, final_output_path)
-                             success = True
-                        except Exception as e2:
-                            logger.error(f"Android client clipping also failed: {e2}")
-                            last_error = str(e2)
+            clients_to_try = ['web', 'ios', 'android']
+            for client in clients_to_try:
+                if success: break
+                for use_cookies in [True, False]:
+                    try:
+                        cookie_status = "with cookies" if use_cookies else "WITHOUT cookies"
+                        logger.info(f"Attempting {client} clipping {cookie_status}...")
+                        
+                        # Ensure file clean before retry
+                        if os.path.exists(final_output_path):
+                            os.remove(final_output_path)
+                            
+                        video_info = download_clip_native(url, start_sec, end_sec, client, quality, final_output_path, check_cookies=use_cookies)
+                        success = True
+                        break # Success with this client/cookie combo
+                    except Exception as e:
+                        logger.warning(f"{client} clipping ({cookie_status}) failed: {e}")
+                        last_error = str(e)
 
             if not success:
-                 raise Exception(f"Failed to create clip after retries. Last error: {last_error}")
+                 raise Exception(f"Failed to create clip after all retries. Last error: {last_error}")
 
             logger.info(f"Clip created successfully: {final_output_path}")
 
