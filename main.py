@@ -196,62 +196,36 @@ def process_info(info):
         "qualities": qualities
     })
 
-def run_ytdlp_subprocess(url, start_sec, end_sec, client_type, quality, output_path):
+def download_clip_native(url, start_sec, end_sec, client_type, quality, output_path):
     """
-    Helper to run yt-dlp as a subprocess with proper headers/auth/client.
+    Download clip using native yt-dlp (simple approach).
     """
-    cmd = [
-        sys.executable, '-m', 'yt_dlp',
-        '--download-sections', f"*{start_sec}-{end_sec}",
-        '--force-keyframes-at-cuts',
-        '-o', '-', # Stream to STDOUT
-        '--quiet',
-        '--no-warnings',
-    ]
-
-    # Client Selection
-    if client_type == 'android':
-        # Use Android client to bypass bot detection
-        cmd.extend(['--extractor-args', 'youtube:player_client=android'])
-    else:
-        # Default Web client
-        # Explicitly set user agent to match a real browser if needed, but yt-dlp default is usually okay.
-        pass
-
-    # Cookie Injection
-    if os.path.exists(COOKIES_PATH):
-        cmd.extend(['--cookies', COOKIES_PATH])
-        logger.info(f"Using cookies from {COOKIES_PATH}")
-
-    # Format Selection
+    ydl_opts = get_ydl_opts(client_type)
+    
+    # Robust format selection that works for most videos
     if quality == 'audio':
-        cmd.extend(['--format', 'bestaudio/best'])
+        format_str = 'bestaudio/best'
     else:
-        cmd.extend(['--format', 'best[ext=mp4]'])
-
-    cmd.append(url)
+        # Try MP4 video+audio, fallback to best MP4, fallback to any best format
+        format_str = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
     
-    logger.info(f"Running yt-dlp subprocess ({client_type}): {' '.join(cmd)}")
+    ydl_opts.update({
+        'outtmpl': output_path,
+        'format': format_str,
+        'download_ranges': yt_dlp.utils.download_range_func(None, [(start_sec, end_sec)]),
+        'force_keyframes_at_cuts': True,
+    })
     
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    logger.info(f"Downloading with yt-dlp ({client_type}, format: {format_str})...")
     
-    # Read stdout into file in chunks
-    with open(output_path, 'wb') as f:
-        while True:
-            chunk = process.stdout.read(1024 * 1024) # 1MB chunks
-            if not chunk:
-                break
-            f.write(chunk)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.extract_info(url, download=True)
     
-    stderr_output = process.stderr.read().decode('utf-8')
-    process.wait()
+    if not os.path.exists(output_path):
+        raise Exception(f"Output file not created at {output_path}")
     
-    if process.returncode != 0:
-        logger.error(f"yt-dlp process ({client_type}) failed: {stderr_output}")
-        raise Exception(f"{stderr_output}")
-
     if os.path.getsize(output_path) == 0:
-        raise Exception(f"yt-dlp produced 0 bytes output.")
+        raise Exception("Downloaded file is 0 bytes")
         
     return True
 
@@ -293,21 +267,21 @@ async def create_clip(
             
             # Attempt 1: Web Client
             try:
-                run_ytdlp_subprocess(url, start_sec, end_sec, 'web', quality, final_output_path)
+                download_clip_native(url, start_sec, end_sec, 'web', quality, final_output_path)
                 success = True
             except Exception as e:
                 logger.warning(f"Web client clipping failed: {e}")
                 last_error = str(e)
                 
                 # Attempt 2: Android Client (Fallback)
-                if "Sign in" in str(e) or "403" in str(e) or "Video unavailable" in str(e):
+                if "Sign in" in str(e) or "403" in str(e) or "Video unavailable" in str(e) or "not available" in str(e):
                     logger.info("Retrying with ANDROID client...")
                     try:
                          # Ensure file clean before retry
                          if os.path.exists(final_output_path):
                              os.remove(final_output_path)
                              
-                         run_ytdlp_subprocess(url, start_sec, end_sec, 'android', quality, final_output_path)
+                         download_clip_native(url, start_sec, end_sec, 'android', quality, final_output_path)
                          success = True
                     except Exception as e2:
                         logger.error(f"Android client clipping also failed: {e2}")
