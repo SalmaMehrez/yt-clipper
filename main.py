@@ -318,8 +318,8 @@ async def create_clip(
 
             logger.info(f"Clip created successfully: {final_output_path}")
 
-            # Verify the file was actually created
-                logger.error(f"Output file not found at {output_path}")
+            if not os.path.exists(final_output_path):
+                logger.error(f"Output file not found at {final_output_path}")
                 raise HTTPException(status_code=500, detail="Clip file was not created successfully")
             
             file_size = os.path.getsize(output_path)
