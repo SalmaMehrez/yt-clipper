@@ -218,11 +218,20 @@ async def create_clip(
             if duration <= 0:
                 raise HTTPException(status_code=400, detail="End time must be greater than start time.")
             
-            # 2. Download and Clip using yt-dlp native "download-sections"
+            # 2. Extract Info and Stream with ffmpeg (Headers Injection Strategy)
+            # This avoids 403 errors by using yt-dlp's headers, and avoids 183 errors by not using yt-dlp's downloader.
             output_filename = f"{clip_id}.mp4"
             output_path = os.path.join(TMP_DIR, output_filename)
             
-            logger.info(f"Downloading clip using yt-dlp native clipping...")
+            # Ensure output file doesn't exist
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except Exception:
+                    output_filename = f"{clip_id}_{uuid.uuid4().hex[:4]}.mp4"
+                    output_path = os.path.join(TMP_DIR, output_filename)
+
+            logger.info(f"Starting ffmpeg stream with headers injection to {output_path}...")
 
             # Initialize variables
             current_client = 'web'
@@ -230,50 +239,79 @@ async def create_clip(
             video_width = 0
             video_height = 0
             
-            # Ensure output file doesn't exist to avoid ffmpeg error 183 (File already exists)
-            if os.path.exists(output_path):
-                logger.warning(f"File {output_path} already exists. Attempting to delete...")
-                try:
-                    os.remove(output_path)
-                    logger.info(f"Successfully deleted {output_path}")
-                except Exception as e:
-                    logger.error(f"CRITICAL: Could not remove existing file {output_path}: {e}")
-                    # If we can't delete it, try to generate a new unique name
-                    output_filename = f"{clip_id}_{uuid.uuid4().hex[:4]}.mp4"
-                    output_path = os.path.join(TMP_DIR, output_filename)
-                    logger.info(f"Switched to new filename: {output_path}")
-
             try:
-                # Prepare yt-dlp options for clipping
+                # 1. Extract Info (URL + Headers)
                 ydl_opts = get_ydl_opts(current_client)
-                ydl_opts.update({
-                    'outtmpl': output_path,
-                    'format': 'best[ext=mp4]',  # Prefer MP4 for compatibility
-                    'download_ranges': yt_dlp.utils.download_range_func(None, [(start_sec, end_sec)]),
-                    'overwrites': True,
-                    # Explicitly force ffmpeg to overwrite if it's called
-                    'downloader_args': {'ffmpeg': ['-y']},
-                    'postprocessor_args': {'ffmpeg': ['-y']},
-                })
-                
-                if quality == "audio":
-                     ydl_opts['format'] = 'bestaudio/best'
-                
-                logger.info(f"Starting yt-dlp download to {output_path}...")
-                # Use extract_info with download=True to get metadata AND download in one go
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    
-                # Extract metadata for response
+                    info = ydl.extract_info(url, download=False)
+
                 video_title = info.get('title', 'Video')
                 video_width = info.get('width', 0)
                 video_height = info.get('height', 0)
                 
+                # Get Headers
+                http_headers = info.get('http_headers', {})
+                headers_str = ""
+                for key, value in http_headers.items():
+                    headers_str += f"{key}: {value}\r\n"
+
+                # Select Formats (Manual selection since we are streaming)
+                formats = info.get('formats', [])
+                video_url = None
+                audio_url = None
+                
+                if quality == "audio":
+                    # Audio only
+                    best_audio = next((f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none'), None)
+                    if best_audio: audio_url = best_audio['url']
+                else:
+                    # Video + Audio
+                    # Find best video for quality (or best available)
+                    video_formats = [f for f in formats if f.get('vcodec') != 'none']
+                    if quality != "best":
+                         target = int(quality)
+                         video_formats = sorted(video_formats, key=lambda x: abs((x.get('height', 0) or 0) - target))
+                    
+                    if video_formats:
+                        video_url = video_formats[-1]['url'] # Best one usually at end of sorted list? No, explicit sort best
+                        # Let's rely on yt-dlp's 'best' selection logic roughly by sorting by tbr
+                        best_video = max(video_formats, key=lambda x: x.get('tbr', 0) or 0)
+                        video_url = best_video['url']
+                        video_width = best_video.get('width')
+                        video_height = best_video.get('height')
+
+                    best_audio = next((f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none'), None)
+                    if best_audio: audio_url = best_audio['url']
+
+                if not video_url and quality != "audio":
+                     raise Exception("No video stream found")
+                if not audio_url and quality == "audio":
+                     raise Exception("No audio stream found")
+
+                # 2. ffmpeg Stream
+                if quality == "audio":
+                     input_stream = ffmpeg.input(audio_url, ss=start_sec, t=duration, headers=headers_str)
+                     output_stream = ffmpeg.output(input_stream, output_path, acodec='aac', vn=None)
+                else:
+                     # Video + Audio (if available)
+                     input_v = ffmpeg.input(video_url, ss=start_sec, t=duration, headers=headers_str)
+                     if audio_url:
+                         input_a = ffmpeg.input(audio_url, ss=start_sec, t=duration, headers=headers_str)
+                         output_stream = ffmpeg.output(input_v, input_a, output_path, vcodec='libx264', acodec='aac', preset='ultrafast', crf=23)
+                     else:
+                         output_stream = ffmpeg.output(input_v, output_path, vcodec='libx264', acodec='aac', preset='ultrafast', crf=23)
+                
+                # Run ffmpeg with overwrite forced
+                output_stream.overwrite_output().run(capture_stdout=True, capture_stderr=True)
+                
                 logger.info(f"Clip created successfully: {output_path}")
 
+            except ffmpeg.Error as e:
+                error_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
+                logger.error(f"ffmpeg processing failed. Full Stderr:\n{error_msg}")
+                raise HTTPException(status_code=500, detail=f"ffmpeg error: {error_msg[-500:]}")
             except Exception as e:
-                logger.exception("yt-dlp clipping failed detailed error:")
-                # Raise 500 but log the full detail
+                logger.exception("Clipping failed detailed error:")
                 raise HTTPException(status_code=500, detail=f"Failed to process clip: {str(e)}")
 
             # Verify the file was actually created
