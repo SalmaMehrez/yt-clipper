@@ -202,12 +202,14 @@ def download_clip_native(url, start_sec, end_sec, client_type, quality, output_p
     """
     ydl_opts = get_ydl_opts(client_type)
     
-    # Robust format selection that works for most videos
+    # CRITICAL: When using download_ranges, yt-dlp cannot merge video+audio
+    # We must use pre-merged formats only (formats that already contain both video and audio)
     if quality == 'audio':
         format_str = 'bestaudio/best'
     else:
-        # Try MP4 video+audio, fallback to best MP4, fallback to any best format
-        format_str = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+        # Use only pre-merged formats (single file with video+audio)
+        # This works with download_ranges, unlike bestvideo+bestaudio
+        format_str = 'best[ext=mp4]/best'
     
     ydl_opts.update({
         'outtmpl': output_path,
