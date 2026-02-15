@@ -218,108 +218,62 @@ async def create_clip(
             if duration <= 0:
                 raise HTTPException(status_code=400, detail="End time must be greater than start time.")
             
-            # 2. Extract Info and Stream via Pipe (Ultimate 183 Fix)
-            # Strategy: ffmpeg pipes data to STDOUT, Python writes to file.
-            # This completely bypasses ffmpeg's file checking/locking mechanism on Windows.
-            
+            # 2. Download and Clip using yt-dlp via STDOUT (The "Nuclear" Option)
+            # Strategy: Run yt-dlp as a subprocess, tell it to download ONLY the section, 
+            # and stream the result to STDOUT ('-o -'). Python captures stdout and writes the file.
+            # This solves:
+            # - 403 Forbidden: yt-dlp handles cookies/headers/signatures internally.
+            # - 183 File Exists: yt-dlp NEVER writes to disk, so no file locking issues on Windows.
+            # - Invalid Data (M3U8): yt-dlp handles HLS/M3U8 formats automatically.
+
             output_filename = f"{clip_id}.mp4"
             final_output_path = os.path.join(TMP_DIR, output_filename)
             
-            logger.info(f"Starting ffmpeg PIPE stream to {output_filename}...")
+            logger.info(f"Starting yt-dlp STDOUT stream to {output_filename}...")
 
-            # Initialize variables
-            current_client = 'web'
-            video_title = "Video"
-            video_width = 0
-            video_height = 0
+            # Ensure final output doesn't exist
+            if os.path.exists(final_output_path):
+                 try: os.remove(final_output_path)
+                 except: pass
+
+            cmd = [
+                sys.executable, '-m', 'yt_dlp',
+                '--download-sections', f"*{start_sec}-{end_sec}",
+                '--force-keyframes-at-cuts',
+                '-o', '-', # Stream to STDOUT
+                '--quiet', # Don't pollute stdout
+                '--no-warnings',
+                url
+            ]
             
-            try:
-                # 1. Extract Info (URL + Headers)
-                ydl_opts = get_ydl_opts(current_client)
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
+            if quality == 'audio':
+                cmd.extend(['--format', 'bestaudio/best'])
+            else:
+                cmd.extend(['--format', 'best[ext=mp4]'])
 
-                video_title = info.get('title', 'Video')
-                video_width = info.get('width', 0)
-                video_height = info.get('height', 0)
+            logger.info(f"Running command: {' '.join(cmd)}")
+            
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            # Read stdout into file in chunks
+            with open(final_output_path, 'wb') as f:
+                while True:
+                    chunk = process.stdout.read(1024 * 1024) # 1MB chunks
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            
+            stderr_output = process.stderr.read().decode('utf-8')
+            process.wait()
+            
+            if process.returncode != 0:
+                logger.error(f"yt-dlp process failed: {stderr_output}")
+                raise Exception(f"yt-dlp failed: {stderr_output}")
                 
-                # Get Headers
-                http_headers = info.get('http_headers', {})
-                headers_str = ""
-                for key, value in http_headers.items():
-                    headers_str += f"{key}: {value}\r\n"
+            if os.path.getsize(final_output_path) == 0:
+                raise Exception("yt-dlp produced 0 bytes output. Check logs.")
 
-                # Select Formats (Manual selection)
-                formats = info.get('formats', [])
-                video_url = None
-                audio_url = None
-                
-                if quality == "audio":
-                    best_audio = next((f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none'), None)
-                    if best_audio: audio_url = best_audio['url']
-                else:
-                    video_formats = [f for f in formats if f.get('vcodec') != 'none']
-                    if quality != "best":
-                         target = int(quality)
-                         video_formats = sorted(video_formats, key=lambda x: abs((x.get('height', 0) or 0) - target))
-                    
-                    if video_formats:
-                        best_video = max(video_formats, key=lambda x: x.get('tbr', 0) or 0)
-                        video_url = best_video['url']
-                        video_width = best_video.get('width')
-                        video_height = best_video.get('height')
-
-                    best_audio = next((f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none'), None)
-                    if best_audio: audio_url = best_audio['url']
-
-                if not video_url and quality != "audio":
-                     raise Exception("No video stream found")
-
-                # 2. Build ffmpeg command for PIPING
-                # Output to 'pipe:' with movflags for streaming mp4
-                if quality == "audio":
-                     input_stream = ffmpeg.input(audio_url, ss=start_sec, t=duration, headers=headers_str)
-                     output_stream = ffmpeg.output(input_stream, 'pipe:', acodec='aac', vn=None, format='mp4', movflags='frag_keyframe+empty_moov')
-                else:
-                     input_v = ffmpeg.input(video_url, ss=start_sec, t=duration, headers=headers_str)
-                     if audio_url:
-                         input_a = ffmpeg.input(audio_url, ss=start_sec, t=duration, headers=headers_str)
-                         output_stream = ffmpeg.output(input_v, input_a, 'pipe:', vcodec='libx264', acodec='aac', preset='ultrafast', crf=23, format='mp4', movflags='frag_keyframe+empty_moov')
-                     else:
-                         output_stream = ffmpeg.output(input_v, 'pipe:', vcodec='libx264', acodec='aac', preset='ultrafast', crf=23, format='mp4', movflags='frag_keyframe+empty_moov')
-                
-                # 3. Run and Capture
-                # We overwrite 'overwrites' just in case, though unrelated to pipe
-                logger.info("Executing ffmpeg pipe...")
-                out, err = output_stream.global_args('-y', '-hide_banner').run(capture_stdout=True, capture_stderr=True)
-                
-                if not out:
-                    raise Exception("ffmpeg produced no output")
-                    
-                # 4. Python writes to file (Robust)
-                # Ensure final output doesn't exist just before writing
-                if os.path.exists(final_output_path):
-                     try: os.remove(final_output_path)
-                     except: pass
-                     
-                with open(final_output_path, "wb") as f:
-                    f.write(out)
-                
-                logger.info(f"Clip created successfully via PIPE: {final_output_path} ({len(out)} bytes)")
-
-            except ffmpeg.Error as e:
-                error_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
-                logger.error(f"ffmpeg processing failed. Full Stderr:\n{error_msg}")
-                raise HTTPException(status_code=500, detail=f"ffmpeg error: {error_msg[-500:]}")
-            except Exception as e:
-                logger.exception("Clipping failed detailed error:")
-                raise HTTPException(status_code=500, detail=f"Failed to process clip: {str(e)}")
-            finally:
-                # Cleanup the isolated directory (not really used now, but good practice if we reverted)
-                try:
-                    shutil.rmtree(request_tmp_dir, ignore_errors=True)
-                except Exception as e:
-                    pass
+            logger.info(f"Clip created successfully via PIPE: {final_output_path}")
 
             # Check final path
             output_path = final_output_path
