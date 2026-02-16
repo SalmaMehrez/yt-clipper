@@ -13,6 +13,7 @@ import asyncio
 import sys
 import subprocess
 import requests
+import random
 from pathlib import Path
 
 # Configure logging
@@ -149,78 +150,158 @@ def get_ydl_opts(client_type='web', check_cookies=True):
 
 # List of public Cobalt instances to try as fallback
 # These are community-maintained and might change
+# Shuffled list of public Cobalt instances to try as fallback
 COBALT_INSTANCES = [
     "https://cobalt.hyonsu.com/api/json",
-    "https://api.cobalt.run/api/json",
-    "https://api.cobalt.tools/api/json",
     "https://cobalt.pervage.xyz/api/json",
-    "https://cobalt.qwer.host/api/json", # Added a few more
-    "https://co.wuk.sh/api/json"         # Main instance sometimes works via proxy
+    "https://cobalt.qwer.host/api/json",
+    "https://cobalt.conner1115.com/api/json",
+    "https://cobalt.inst.host/api/json",
+    "https://api.cobalt.run/api/json",
+    "https://cobalt.sh/api/json",
+    "https://cobalt.tools/api/json" # Keeping this as a last resort
+]
+random.shuffle(COBALT_INSTANCES)
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0"
 ]
 
+def get_video_info_invidious(url: str):
+    """Fallback to Invidious API for video metadata."""
+    video_id = get_video_id(url)
+    if not video_id:
+        return None
+        
+    logger.info(f"Attempting Invidious API extraction for {video_id}...")
+    # List of public Invidious instances
+    instances = ["https://invidious.io", "https://yewtu.be", "https://inv.vern.cc"]
+    for instance in instances:
+        try:
+            response = requests.get(f"{instance}/api/v1/videos/{video_id}", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    "status": "success",
+                    "title": data.get("title", "YouTube Video (Invidious)"),
+                    "duration": data.get("lengthSeconds", 0),
+                    "thumbnail": data.get("videoThumbnails", [{}])[0].get("url", ""),
+                    "qualities": [{"value": "best", "label": "Qualité Invidious (Auto)"}],
+                    "invidious_data": data
+                }
+        except:
+            continue
+    return None
+
+def get_video_id(url: str) -> Optional[str]:
+    """Extracts video ID from a YouTube URL."""
+    import re
+    patterns = [
+        r"(?:v=|\/)([0-9A-Za-z_-]{11}).*",
+        r"youtu\.be\/([0-9A-Za-z_-]{11})"
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+def get_video_info_piped(url: str):
+    """Fallback to Piped API for video metadata."""
+    video_id = get_video_id(url)
+    if not video_id:
+        return None
+        
+    logger.info(f"Attempting Piped API extraction for {video_id}...")
+    try:
+        # Trying a popular public instance
+        response = requests.get(f"https://pipedapi.kavin.rocks/streams/{video_id}", timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "status": "success",
+                "title": data.get("title", "YouTube Video (Piped)"),
+                "duration": data.get("duration", 0),
+                "thumbnail": data.get("thumbnailUrl", ""),
+                "qualities": [{"value": "best", "label": "Qualité Piped (Auto)"}],
+                "piped_data": data # Keep full data for potential direct links
+            }
+    except Exception as e:
+        logger.warning(f"Piped API failed: {e}")
+    return None
+
 def get_video_info_cobalt(url: str):
-    """Fetches video info using Cobalt API (v10) as fallback. Tries multiple instances."""
-    logger.info(f"Attempting Cobalt extraction for {url} using multiple instances...")
+    """Fetches video info using Cobalt API (v10/v7) as fallback. Tries multiple instances and formats."""
+    logger.info(f"Attempting Cobalt extraction for {url} using multiple instances and formats...")
     
-    payload = {
-        "url": url,
-        "videoQuality": "1080",
-        "filenameStyle": "basic"
-    }
+    payloads = [
+        {"url": url, "videoQuality": "1080", "filenameStyle": "basic"}, # v10
+        {"url": url, "vQuality": "max", "filenamePattern": "basic", "isAudioOnly": False} # v7
+    ]
     
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": random.choice(USER_AGENTS),
+        "Referer": "https://cobalt.tools/"
     }
     
-    for instance in COBALT_INSTANCES:
-        try:
-            logger.info(f"Trying Cobalt instance: {instance}")
-            response = requests.post(instance, json=payload, headers=headers, timeout=15)
-            
-            if response.status_code == 200:
-                data = response.json()
-                status = data.get("status")
-                logger.info(f"Instance {instance} returned status: {status}")
+    # Try multiple instances in shuffled order
+    instances_to_try = COBALT_INSTANCES.copy()
+    random.shuffle(instances_to_try)
+    
+    for instance in instances_to_try:
+        for payload in payloads:
+            try:
+                # Use a small timeout to skip slow instances
+                logger.info(f"Trying instance {instance} with payload {list(payload.keys())[1]}")
+                response = requests.post(instance, json=payload, headers=headers, timeout=10)
                 
-                if status in ["stream", "redirect"]:
-                    logger.info(f"SUCCESS with instance {instance}")
-                    return {
-                        "status": "success",
-                        "title": data.get("filename", "YouTube Video (Cobalt)"),
-                        "duration": 0,
-                        "thumbnail": "",
-                        "qualities": [
-                            {"value": "best", "label": "Qualité Cobalt (Auto)"},
-                            {"value": "audio", "label": "Audio uniquement"}
-                        ],
-                        "cobalt_url": data.get("url")
-                    }
-                elif status == "picker":
-                     picker_items = data.get("picker", [])
-                     if picker_items:
-                         return {
+                if response.status_code == 200:
+                    data = response.json()
+                    status = data.get("status")
+                    logger.info(f"Instance {instance} returned status: {status}")
+                    
+                    if status in ["stream", "redirect", "success"]:
+                        logger.info(f"SUCCESS with instance {instance}")
+                        return {
                             "status": "success",
-                            "title": "YouTube Video (Cobalt Picker)",
+                            "title": data.get("filename", "YouTube Video (Cobalt)"),
                             "duration": 0,
                             "thumbnail": "",
-                            "qualities": [{"value": "best", "label": "Qualité Cobalt (Picker)"}],
-                            "cobalt_url": picker_items[0].get("url")
+                            "qualities": [
+                                {"value": "best", "label": "Qualité Cobalt (Auto)"},
+                                {"value": "audio", "label": "Audio uniquement"}
+                            ],
+                            "cobalt_url": data.get("url")
                         }
-            else:
-                logger.warning(f"Instance {instance} returned {response.status_code}")
-                
-        except Exception as e:
-            logger.warning(f"Failed to connect to Cobalt instance {instance}: {e}")
-            continue
+                    elif status == "picker":
+                         picker_items = data.get("picker", [])
+                         if picker_items:
+                             return {
+                                "status": "success",
+                                "title": "YouTube Video (Cobalt Picker)",
+                                "duration": 0,
+                                "thumbnail": "",
+                                "qualities": [{"value": "best", "label": "Qualité Cobalt (Picker)"}],
+                                "cobalt_url": picker_items[0].get("url")
+                            }
+                else:
+                    logger.debug(f"Instance {instance} returned {response.status_code}")
+                    
+            except Exception as e:
+                # Skip to next payload/instance silently to avoid log spam
+                continue
             
     return None
 
-def download_clip_cobalt(cobalt_direct_url, start_sec, end_sec, output_path):
+def download_clip_direct(direct_url, start_sec, end_sec, output_path):
     """
-    Downloads a clip from a direct URL (provided by Cobalt) using ffmpeg.
-    Useful when yt-dlp is blocked but we have a direct media link.
+    Downloads a clip from any direct URL using ffmpeg.
+    Useful when yt-dlp is blocked but we have a direct media link (from Cobalt, Piped, Invidious).
     """
     try:
         duration = end_sec - start_sec
@@ -233,10 +314,10 @@ def download_clip_cobalt(cobalt_direct_url, start_sec, end_sec, output_path):
             '-i', cobalt_direct_url,
             '-t', str(duration),
             '-c', 'copy', # Try to copy codec first for speed
-            output_path
+                output_path
         ]
         
-        logger.info(f"Running ffmpeg over Cobalt URL: {' '.join(cmd)}")
+        logger.info(f"Running ffmpeg over direct URL: {' '.join(cmd)}")
         process = subprocess.run(cmd, capture_output=True, text=True)
         
         if process.returncode != 0:
@@ -245,7 +326,7 @@ def download_clip_cobalt(cobalt_direct_url, start_sec, end_sec, output_path):
             cmd = [
                 'ffmpeg', '-y',
                 '-ss', str(start_sec),
-                '-i', cobalt_direct_url,
+                '-i', direct_url,
                 '-t', str(duration),
                 '-c:v', 'libx264', '-preset', 'veryfast',
                 '-c:a', 'aac',
@@ -256,10 +337,10 @@ def download_clip_cobalt(cobalt_direct_url, start_sec, end_sec, output_path):
         if process.returncode == 0 and os.path.exists(output_path):
             return True
         else:
-            logger.error(f"Ffmpeg Cobalt download failed: {process.stderr}")
+            logger.error(f"Ffmpeg direct download failed: {process.stderr}")
             return False
     except Exception as e:
-        logger.error(f"Error in download_clip_cobalt: {e}")
+        logger.error(f"Error in download_clip_direct: {e}")
         return False
 
 @app.post("/api/info")
@@ -299,9 +380,19 @@ async def get_video_info(url: str = Form(...)):
     cobalt_info = get_video_info_cobalt(url)
     if cobalt_info:
         return JSONResponse(cobalt_info)
+        
+    # LAST RESORT: Piped API (Metadata only)
+    piped_info = get_video_info_piped(url)
+    if piped_info:
+        return JSONResponse(piped_info)
+        
+    # ABSOLUTE LAST RESORT: Invidious API
+    invidious_info = get_video_info_invidious(url)
+    if invidious_info:
+        return JSONResponse(invidious_info)
                 
     logger.error("All extraction attempts failed.")
-    raise HTTPException(status_code=400, detail="YouTube bloque l'accès depuis Render. Même le bypass Cobalt a échoué. Réessayez plus tard.")
+    raise HTTPException(status_code=400, detail="YouTube bloque l'accès depuis Render. Même les bypass Cobalt et Piped ont échoué. Essayez une autre vidéo.")
 
 def process_info(info):
     title = info.get('title', 'Vidéo sans titre')
@@ -459,12 +550,33 @@ async def create_clip(
                 logger.info("Native clipping failed, attempting Cobalt fallback...")
                 cobalt_data = get_video_info_cobalt(url)
                 if cobalt_data and cobalt_data.get("cobalt_url"):
-                    success = download_clip_cobalt(cobalt_data["cobalt_url"], start_sec, end_sec, final_output_path)
+                    success = download_clip_direct(cobalt_data["cobalt_url"], start_sec, end_sec, final_output_path)
                     if success:
                         video_info = {"title": cobalt_data.get("title", "Clip Cobalt"), "width": 0, "height": 0}
 
             if not success:
-                 raise Exception(f"Failed to create clip after all retries (including Cobalt). Last error: {last_error}")
+                logger.info("Cobalt clipping failed, attempting Piped/Invidious direct link fallback...")
+                # Check Piped
+                piped_data = get_video_info_piped(url)
+                if piped_data and piped_data.get("piped_data"):
+                    streams = piped_data["piped_data"].get("videoStreams", [])
+                    if streams:
+                        success = download_clip_direct(streams[0]["url"], start_sec, end_sec, final_output_path)
+                        if success:
+                            video_info = {"title": piped_data.get("title", "Clip Piped"), "width": 0, "height": 0}
+                
+                # Check Invidious
+                if not success:
+                    invidious_data = get_video_info_invidious(url)
+                    if invidious_data and invidious_data.get("invidious_data"):
+                        streams = invidious_data["invidious_data"].get("formatStreams", [])
+                        if streams:
+                            success = download_clip_direct(streams[0]["url"], start_sec, end_sec, final_output_path)
+                            if success:
+                                video_info = {"title": invidious_data.get("title", "Clip Invidious"), "width": 0, "height": 0}
+
+            if not success:
+                 raise Exception(f"Failed to create clip after all retries (including all bypasses). Last error: {last_error}")
 
             logger.info(f"Clip created successfully: {final_output_path}")
 
