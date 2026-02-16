@@ -12,6 +12,7 @@ import ffmpeg
 import asyncio
 import sys
 import subprocess
+import requests
 from pathlib import Path
 
 # Configure logging
@@ -146,6 +147,121 @@ def get_ydl_opts(client_type='web', check_cookies=True):
         
     return opts
 
+# List of public Cobalt instances to try as fallback
+# These are community-maintained and might change
+COBALT_INSTANCES = [
+    "https://cobalt.hyonsu.com/api/json",
+    "https://api.cobalt.run/api/json",
+    "https://api.cobalt.tools/api/json",
+    "https://cobalt.pervage.xyz/api/json",
+    "https://cobalt.qwer.host/api/json", # Added a few more
+    "https://co.wuk.sh/api/json"         # Main instance sometimes works via proxy
+]
+
+def get_video_info_cobalt(url: str):
+    """Fetches video info using Cobalt API (v10) as fallback. Tries multiple instances."""
+    logger.info(f"Attempting Cobalt extraction for {url} using multiple instances...")
+    
+    payload = {
+        "url": url,
+        "videoQuality": "1080",
+        "filenameStyle": "basic"
+    }
+    
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    }
+    
+    for instance in COBALT_INSTANCES:
+        try:
+            logger.info(f"Trying Cobalt instance: {instance}")
+            response = requests.post(instance, json=payload, headers=headers, timeout=15)
+            
+            if response.status_code == 200:
+                data = response.json()
+                status = data.get("status")
+                logger.info(f"Instance {instance} returned status: {status}")
+                
+                if status in ["stream", "redirect"]:
+                    logger.info(f"SUCCESS with instance {instance}")
+                    return {
+                        "status": "success",
+                        "title": data.get("filename", "YouTube Video (Cobalt)"),
+                        "duration": 0,
+                        "thumbnail": "",
+                        "qualities": [
+                            {"value": "best", "label": "Qualité Cobalt (Auto)"},
+                            {"value": "audio", "label": "Audio uniquement"}
+                        ],
+                        "cobalt_url": data.get("url")
+                    }
+                elif status == "picker":
+                     picker_items = data.get("picker", [])
+                     if picker_items:
+                         return {
+                            "status": "success",
+                            "title": "YouTube Video (Cobalt Picker)",
+                            "duration": 0,
+                            "thumbnail": "",
+                            "qualities": [{"value": "best", "label": "Qualité Cobalt (Picker)"}],
+                            "cobalt_url": picker_items[0].get("url")
+                        }
+            else:
+                logger.warning(f"Instance {instance} returned {response.status_code}")
+                
+        except Exception as e:
+            logger.warning(f"Failed to connect to Cobalt instance {instance}: {e}")
+            continue
+            
+    return None
+
+def download_clip_cobalt(cobalt_direct_url, start_sec, end_sec, output_path):
+    """
+    Downloads a clip from a direct URL (provided by Cobalt) using ffmpeg.
+    Useful when yt-dlp is blocked but we have a direct media link.
+    """
+    try:
+        duration = end_sec - start_sec
+        # Use ffmpeg to stream from the direct URL and cut
+        # -ss before -i for fast seeking (less accurate but much faster for long videos)
+        # or after -i for frame-accurate but slower. Here we use it before for performance on server.
+        cmd = [
+            'ffmpeg', '-y',
+            '-ss', str(start_sec),
+            '-i', cobalt_direct_url,
+            '-t', str(duration),
+            '-c', 'copy', # Try to copy codec first for speed
+            output_path
+        ]
+        
+        logger.info(f"Running ffmpeg over Cobalt URL: {' '.join(cmd)}")
+        process = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if process.returncode != 0:
+            logger.warning("Ffmpeg 'copy' failed, retrying with re-encoding...")
+            # Retry with re-encoding if copy fails (e.g. if seek point isn't a keyframe)
+            cmd = [
+                'ffmpeg', '-y',
+                '-ss', str(start_sec),
+                '-i', cobalt_direct_url,
+                '-t', str(duration),
+                '-c:v', 'libx264', '-preset', 'veryfast',
+                '-c:a', 'aac',
+                output_path
+            ]
+            process = subprocess.run(cmd, capture_output=True, text=True)
+            
+        if process.returncode == 0 and os.path.exists(output_path):
+            return True
+        else:
+            logger.error(f"Ffmpeg Cobalt download failed: {process.stderr}")
+            return False
+    except Exception as e:
+        logger.error(f"Error in download_clip_cobalt: {e}")
+        return False
+
 @app.post("/api/info")
 async def get_video_info(url: str = Form(...)):
     clients = ['web', 'ios', 'tv', 'android', 'mweb', 'web_creator', 'none']
@@ -172,15 +288,20 @@ async def get_video_info(url: str = Form(...)):
                     # Disable format checking during info extraction to avoid "Requested format is not available"
                     opts['check_formats'] = False 
                 
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    return process_info(info)
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                        return process_info(info)
             except Exception as e:
                 logger.warning(f"{client} extraction ({cookie_status}) failed: {e}")
                 continue # Try next combination
+    
+    # ULTIMATE FALLBACK: Cobalt API
+    cobalt_info = get_video_info_cobalt(url)
+    if cobalt_info:
+        return JSONResponse(cobalt_info)
                 
     logger.error("All extraction attempts failed.")
-    raise HTTPException(status_code=400, detail="YouTube bloque l'accès depuis Render (Web/iOS/TV/Android). Essayez une autre vidéo ou réessayez plus tard.")
+    raise HTTPException(status_code=400, detail="YouTube bloque l'accès depuis Render. Même le bypass Cobalt a échoué. Réessayez plus tard.")
 
 def process_info(info):
     title = info.get('title', 'Vidéo sans titre')
@@ -335,7 +456,15 @@ async def create_clip(
                         last_error = str(e)
 
             if not success:
-                 raise Exception(f"Failed to create clip after all retries. Last error: {last_error}")
+                logger.info("Native clipping failed, attempting Cobalt fallback...")
+                cobalt_data = get_video_info_cobalt(url)
+                if cobalt_data and cobalt_data.get("cobalt_url"):
+                    success = download_clip_cobalt(cobalt_data["cobalt_url"], start_sec, end_sec, final_output_path)
+                    if success:
+                        video_info = {"title": cobalt_data.get("title", "Clip Cobalt"), "width": 0, "height": 0}
+
+            if not success:
+                 raise Exception(f"Failed to create clip after all retries (including Cobalt). Last error: {last_error}")
 
             logger.info(f"Clip created successfully: {final_output_path}")
 
