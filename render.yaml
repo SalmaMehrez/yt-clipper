@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: youtube-clipper
+    env: docker
+    plan: free
+    region: frankfurt
+    numInstances: 1
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: 8080
