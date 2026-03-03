@@ -73,7 +73,7 @@ processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 @app.post("/api/info")
 async def get_video_info(url: str = Form(...)):
     try:
-        yt = pytubefix.YouTube(url, client='WEB')
+        yt = pytubefix.YouTube(url, client='MWEB')
         
         title = yt.title or 'Vidéo sans titre'
         duration = yt.length or 0
@@ -149,7 +149,7 @@ async def create_clip(
             video_width = 0
 
             try:
-                yt = pytubefix.YouTube(url, client='WEB')
+                yt = pytubefix.YouTube(url, client='MWEB')
                 video_title = yt.title or 'video'
 
                 target_height = 0
