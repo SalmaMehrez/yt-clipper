@@ -73,7 +73,9 @@ processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 @app.post("/api/info")
 async def get_video_info(url: str = Form(...)):
     try:
-        yt = pytubefix.YouTube(url, client='MWEB')
+        po_token = os.environ.get("PO_TOKEN")
+        visitor_id = os.environ.get("VISITOR_ID")
+        yt = pytubefix.YouTube(url, client='MWEB', use_po_token=True, po_token=po_token, visitor_id=visitor_id)
         
         title = yt.title or 'Vidéo sans titre'
         duration = yt.length or 0
@@ -149,7 +151,15 @@ async def create_clip(
             video_width = 0
 
             try:
-                yt = pytubefix.YouTube(url, client='MWEB')
+                # Use PO_TOKEN and VISITOR_ID from environment if available
+                po_token = os.environ.get("PO_TOKEN")
+                visitor_id = os.environ.get("VISITOR_ID")
+                
+                yt = pytubefix.YouTube(url, 
+                                       client='MWEB', 
+                                       use_po_token=True, 
+                                       po_token=po_token, 
+                                       visitor_id=visitor_id)
                 video_title = yt.title or 'video'
 
                 target_height = 0
@@ -248,6 +258,7 @@ async def create_clip(
                 if local_audio_path: background_tasks.add_task(cleanup_file, local_audio_path)
                 
             except ffmpeg.Error as e:
+                error_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
                 logger.warning(f"ffmpeg copy failed, falling back to re-encode")
                 logger.warning(f"ffmpeg fallback error: {error_msg}")
                 raise HTTPException(status_code=500, detail=f"Failed to process video clip: {error_msg}")
