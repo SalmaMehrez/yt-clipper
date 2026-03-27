@@ -312,6 +312,15 @@ async def download_file(filename: str, background_tasks: BackgroundTasks):
     else:
         raise HTTPException(status_code=404, detail="File not found or expired.")
 
+@app.get("/download/agent")
+async def download_agent():
+    agent_path = "static/downloads/YTClipper-Agent.exe"
+    if os.path.exists(agent_path):
+        return FileResponse(agent_path, filename="YTClipper-Agent.exe")
+    else:
+        # Fallback or error if not yet compiled/placed
+        raise HTTPException(status_code=404, detail="L'agent n'est pas encore disponible au téléchargement.")
+
 @app.get("/")
 async def read_root():
     return FileResponse("static/index.html")

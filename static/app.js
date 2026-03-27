@@ -1,8 +1,35 @@
+const LOCAL_AGENT_URL = "http://localhost:5000";
+
+// Check agent status on load
+window.addEventListener('DOMContentLoaded', async () => {
+    const statusBadge = document.getElementById('statusBadge');
+    const downloadBtn = document.getElementById('downloadAgentBtn');
+
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 2000);
+        
+        const response = await fetch(`${LOCAL_AGENT_URL}/ping`, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        if (response.ok) {
+            statusBadge.className = 'badge success';
+            statusBadge.textContent = '✅ Agent connecté';
+            downloadBtn.classList.add('hidden');
+        } else {
+            throw new Error();
+        }
+    } catch (err) {
+        statusBadge.className = 'badge warning';
+        statusBadge.textContent = '⚠️ Agent non détecté';
+        downloadBtn.classList.remove('hidden');
+    }
+});
+
 document.getElementById('checkVideoBtn').addEventListener('click', async function () {
     const urlInput = document.getElementById('url');
     const btn = document.getElementById('checkVideoBtn');
     const statusMessage = document.getElementById('statusMessage');
-    const qualitySelect = document.getElementById('quality');
     const metaContainer = document.getElementById('videoMeta');
 
     if (!urlInput.value) {
@@ -16,46 +43,29 @@ document.getElementById('checkVideoBtn').addEventListener('click', async functio
     btn.textContent = "⏳...";
     statusMessage.classList.add('hidden');
 
-    const formData = new FormData();
-    formData.append('url', urlInput.value);
-
     try {
-        const response = await fetch('/api/info', {
+        const response = await fetch(`${LOCAL_AGENT_URL}/info`, {
             method: 'POST',
-            body: formData
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: urlInput.value })
         });
         const data = await response.json();
 
         if (response.ok) {
-            // Update Metadata UI
             document.getElementById('metaTitle').textContent = data.title;
             document.getElementById('metaThumb').src = data.thumbnail;
-
-            // Format duration
+            
             const minutes = Math.floor(data.duration / 60);
             const seconds = data.duration % 60;
             document.getElementById('metaDuration').textContent = `Durée: ${minutes}m ${seconds}s`;
 
             metaContainer.classList.remove('hidden');
-            metaContainer.style.display = 'flex'; // Ensure flex layout
-
-            // Update Quality Dropdown
-            qualitySelect.innerHTML = ''; // Clear existing
-            data.qualities.forEach(q => {
-                const option = document.createElement('option');
-                option.value = q.value;
-                option.textContent = q.label;
-                qualitySelect.appendChild(option);
-            });
-
-            // Auto-fill duration if empty (optional, helpful for full clip)
-            // document.getElementById('endTime').value = data.duration; 
-
+            metaContainer.style.display = 'flex';
         } else {
-            throw new Error(data.detail || "Erreur lors de la récupération des infos.");
+            throw new Error(data.error || "Erreur lors de la récupération des infos.");
         }
     } catch (error) {
-        statusMessage.textContent = error.message;
+        statusMessage.textContent = "Erreur: Assurez-vous que l'agent local est lancé. " + error.message;
         statusMessage.className = 'error';
         statusMessage.classList.remove('hidden');
     } finally {
@@ -72,51 +82,43 @@ document.getElementById('clipForm').addEventListener('submit', async function (e
     const resultArea = document.getElementById('resultArea');
     const downloadLink = document.getElementById('downloadLink');
 
-    // Reset UI
     statusMessage.classList.add('hidden');
-    statusMessage.className = 'hidden'; // Remove error/success classes
+    statusMessage.className = 'hidden';
     resultArea.classList.add('hidden');
 
-    // Clear previous dynamic info
-    const existingRes = document.querySelector('.video-info p:nth-child(3)');
-    if (existingRes) existingRes.remove();
-
-    document.getElementById('videoPlayer').pause();
-    document.getElementById('videoPlayer').src = "";
-    document.getElementById('videoPlayer').classList.add('hidden');
     submitBtn.disabled = true;
-    submitBtn.textContent = 'Traitement en cours...';
+    submitBtn.textContent = '⏳ Téléchargement et découpage en cours...';
 
-    const formData = new FormData();
-    formData.append('url', document.getElementById('url').value);
-    formData.append('quality', document.getElementById('quality').value);
-    formData.append('start_time', document.getElementById('startTime').value);
-    formData.append('end_time', document.getElementById('endTime').value);
+    const payload = {
+        url: document.getElementById('url').value,
+        start: document.getElementById('startTime').value,
+        end: document.getElementById('endTime').value
+    };
 
     try {
-        const response = await fetch('/api/clip', {
+        const response = await fetch(`${LOCAL_AGENT_URL}/clip`, {
             method: 'POST',
-            body: formData
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
         });
 
-        const data = await response.json();
-
         if (response.ok) {
-            statusMessage.textContent = 'Séquence extraite avec succès !';
+            const blob = await response.blob();
+            const downloadUrl = window.URL.createObjectURL(blob);
+            
+            statusMessage.textContent = '✅ Clip téléchargé avec succès !';
             statusMessage.className = 'success';
             statusMessage.classList.remove('hidden');
 
-            document.getElementById('videoTitle').textContent = data.title || 'Votre vidéo';
-            document.getElementById('videoDuration').textContent = data.duration;
-
-            const videoPlayer = document.getElementById('videoPlayer');
-            videoPlayer.src = data.download_url;
-            videoPlayer.classList.remove('hidden');
-
-            downloadLink.href = data.download_url;
+            downloadLink.href = downloadUrl;
+            downloadLink.download = `clip_${Date.now()}.mp4`;
             resultArea.classList.remove('hidden');
+            
+            // Trigger automatic download
+            downloadLink.click();
         } else {
-            throw new Error(data.detail || 'Une erreur est survenue.');
+            const data = await response.json();
+            throw new Error(data.error || 'Une erreur est survenue.');
         }
     } catch (error) {
         statusMessage.textContent = error.message;
