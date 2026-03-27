@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  yt-clipper:
+    build: .
+    container_name: yt_clipper_app
+    restart: always
+    ports:
+      - "80:8000" # Expose on standard HTTP port 80
+    environment:
+      - PORT=8000
+      - WORKERS=4 # Allow multiple concurrent requests
+      - MAX_CONCURRENT_TASKS=4 # IMPORTANT: Increase this if you have a powerful server (CPU cores / 2)
+      # - BUCKET_NAME=your-gcs-bucket-name # Optional
+      # - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials.json # Optional
+    volumes:
+      # Mount a volume for temporary files if you want to inspect them, 
+      # or just to keep the container lightweight.
+      - ./tmp:/tmp/yt_clipper
+      # Mount GCS credentials if needed
+      # - ./credentials.json:/app/credentials.json
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0' # Limit CPU usage to avoid freezing the server
+          memory: 2048M # Limit RAM
