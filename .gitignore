@@ -13,3 +13,12 @@ tmp/
 .vscode/
 .idea/
 *.log
+
+# PyInstaller artifacts
+build/
+dist/
+*.spec
+
+
+ffmpeg.exe
+
